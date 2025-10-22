@@ -55,6 +55,8 @@ uvicorn main:app --reload
 ```
 
 ### 2. 启动前端服务
+
+```bash
 # (在另一个终端中) 进入前端目录
 cd frontend
 
