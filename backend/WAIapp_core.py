@@ -6,6 +6,9 @@ import numpy as np
 import warnings
 from dotenv import load_dotenv
 from volcenginesdkarkruntime import Ark
+import markdown2
+import json
+from pandarallel import pandarallel
 
 # 分析库
 from sklearn.cluster import KMeans
@@ -14,6 +17,8 @@ from keras.models import Sequential
 from keras.layers import LSTM, Dense, Input
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from pandas.errors import SettingWithCopyWarning, DtypeWarning
+from mlxtend.preprocessing import TransactionEncoder
+from mlxtend.frequent_patterns import apriori, association_rules
 
 # 可视化库
 import plotly.graph_objects as go
@@ -24,6 +29,9 @@ load_dotenv()
 
 # (关键) 解决 KMeans 内存泄漏警告
 os.environ['OMP_NUM_THREADS'] = '1'
+
+# 初始化 pandarallel，禁用进度条以保持日志清洁
+pandarallel.initialize(progress_bar=False) 
 
 # 抑制特定的Pandas警告
 warnings.filterwarnings('ignore', category=SettingWithCopyWarning)
@@ -129,7 +137,23 @@ def generate_full_report_stream(user_profile: dict):
     """
     user_input = f"请基于我的画像，为我生成一份关于'{market}'市场的机会识别与竞争分析报告，重点关注'{categories}'品类。"
 
-    request_params = {"model": "doubao-seed-1-6-250615", "input": [{"role": "system", "content": [{"type": "input_text", "text": system_prompt}]}, {"role": "user", "content": [{"type": "input_text", "text": user_input}]}], "tools": [{"type": "web_search", "limit": 15}], "stream": True}
+    use_websearch = user_profile.get("use_websearch", False)
+    request_params = {
+        "model": "doubao-seed-1-6-250615",
+        "input": [
+            {
+                "role": "system",
+                "content": [{"type": "input_text", "text": system_prompt}]
+            },
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": user_input}]
+            }
+        ],
+        "stream": True
+    }
+    if use_websearch:
+        request_params["tools"] = [{"type": "web_search", "limit": 15}]
     
     try:
         response = ark_client.responses.create(**request_params)
@@ -290,7 +314,7 @@ def generate_review_summary_report(positive_reviews_sample: str, negative_review
 
 
 # ==============================================================================
-# 数据处理模块
+# 数据处理与分析模块 (优化版)
 # ==============================================================================
 
 def clean_sales_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -354,57 +378,162 @@ def perform_lstm_forecast(df: pd.DataFrame) -> go.Figure:
     fig.update_layout(title='未来30天销售额深度学习预测 (LSTM模型)', xaxis_title='日期', yaxis_title='销售额', template='plotly_white')
     return fig
 
+def calculate_wcss_for_elbow(scaled_data, max_k=10):
+    """
+    为手肘法计算不同K值下的WCSS (簇内平方和)
+    """
+    wcss = []
+    for k in range(1, max_k + 1):
+        kmeans = KMeans(n_clusters=k, n_init=10, random_state=42)
+        kmeans.fit(scaled_data)
+        wcss.append(kmeans.inertia_)
+    
+    return [{'k': i + 1, 'wcss': val} for i, val in enumerate(wcss)]
+
+def perform_basket_analysis(df: pd.DataFrame):
+    """
+    执行购物篮分析 (Apriori 算法)
+    """
+    basket = (df.groupby(['Order ID', 'SKU'])['Qty']
+              .sum().unstack().reset_index().fillna(0)
+              .set_index('Order ID'))
+
+    def encode_units(x):
+        return x > 0
+
+    basket_sets = basket.applymap(encode_units)
+    
+    frequent_itemsets = apriori(basket_sets, min_support=0.015, use_colnames=True)
+    if frequent_itemsets.empty:
+        return []
+
+    rules = association_rules(frequent_itemsets, metric="lift", min_threshold=1)
+    
+    if rules.empty:
+        return []
+
+    rules["antecedents"] = rules["antecedents"].apply(lambda x: ', '.join(list(x)))
+    rules["consequents"] = rules["consequents"].apply(lambda x: ', '.join(list(x)))
+    
+    result = rules[['antecedents', 'consequents', 'support', 'confidence', 'lift']]
+    result = result.sort_values(by='lift', ascending=False)
+
+    result['support'] = result['support'].map('{:.2%}'.format)
+    result['confidence'] = result['confidence'].map('{:.2%}'.format)
+    result['lift'] = result['lift'].map('{:.2f}'.format)
+
+    return result.to_dict(orient='records')
+
 def perform_product_clustering(df: pd.DataFrame) -> dict:
-    """产品聚类函数，返回包含多个DataFrame的字典"""
+    """
+    【最终修正版】产品聚类函数，修正了图表JSON生成的bug
+    """
     required_cols = ['SKU', 'Amount', 'Qty', 'Order ID']
-    if not all(col in df.columns for col in df.columns):
+    if not all(col in df.columns for col in required_cols):
         raise ValueError("聚类分析失败：缺少必要的列。")
     
-    product_agg_df = df.groupby('SKU').agg(total_amount=('Amount', 'sum'), total_qty=('Qty', 'sum'), order_count=('Order ID', 'nunique')).reset_index()
-    features = product_agg_df[['total_amount', 'total_qty', 'order_count']]
+    product_agg_df = df.groupby('SKU').agg(
+        total_amount=('Amount', 'sum'), 
+        total_qty=('Qty', 'sum'), 
+        order_count=('Order ID', 'nunique')
+    ).reset_index()
+
+    if len(product_agg_df) > 10000:
+        df_for_clustering = product_agg_df.sample(n=10000, random_state=42)
+    else:
+        df_for_clustering = product_agg_df
+
+    features = df_for_clustering[['total_amount', 'total_qty', 'order_count']]
     scaler = StandardScaler()
     features_scaled = scaler.fit_transform(features)
     
+    elbow_data = calculate_wcss_for_elbow(features_scaled)
+    
     kmeans = KMeans(n_clusters=3, n_init=10, random_state=42)
-    product_agg_df['cluster'] = kmeans.fit_predict(features_scaled)
+    kmeans.fit(features_scaled)
+
+    all_features = product_agg_df[['total_amount', 'total_qty', 'order_count']]
+    all_features_scaled = scaler.transform(all_features)
+    product_agg_df['cluster'] = kmeans.predict(all_features_scaled)
     
-    cluster_summary = product_agg_df.groupby('cluster')[['total_amount', 'total_qty', 'order_count']].mean().sort_values(by='total_amount', ascending=False)
+    cluster_summary_df = product_agg_df.groupby('cluster')[['total_amount', 'total_qty', 'order_count']].mean().sort_values(by='total_amount', ascending=False).reset_index()
     
-    hot_product_cluster_id = cluster_summary.index[0]
-    hot_products = product_agg_df[product_agg_df['cluster'] == hot_product_cluster_id].sort_values(by='total_amount', ascending=False)
+    if not cluster_summary_df.empty:
+        hot_cluster_id = cluster_summary_df.iloc[0]['cluster']
+        cluster_summary_df['is_hot_cluster'] = cluster_summary_df['cluster'] == hot_cluster_id
+    else:
+        cluster_summary_df['is_hot_cluster'] = False
+
+    # --- 生成图表对象 ---
+    # 1. 手肘法图表
+    fig_elbow = go.Figure()
+    fig_elbow.add_trace(go.Scatter(
+        x=[d['k'] for d in elbow_data],
+        y=[d['wcss'] for d in elbow_data],
+        mode='lines+markers'
+    ))
+    fig_elbow.update_layout(
+        title='手肘法确定最佳聚类数',
+        xaxis_title='聚类数量 K',
+        yaxis_title='簇内平方和 (WCSS)',
+        template='plotly_dark'
+    )
+
+    # 2. 3D散点图
+    fig_3d = go.Figure()
+    fig_3d.add_trace(go.Scatter3d(
+        x=product_agg_df['total_amount'],
+        y=product_agg_df['total_qty'],
+        z=product_agg_df['order_count'],
+        text=product_agg_df['SKU'],
+        hoverinfo='x+y+z+text',
+        mode='markers',
+        marker=dict(
+            size=5,
+            color=product_agg_df['cluster'],
+            colorscale='Viridis',
+            opacity=0.8
+        )
+    ))
+    fig_3d.update_layout(
+        title='3D聚类结果可视化',
+        template='plotly_dark',
+        scene=dict(
+            xaxis_title='总销售额',
+            yaxis_title='总销量',
+            zaxis_title='订单数'
+        )
+    )
     
-    # 将DataFrame转为JSON兼容的格式(字典列表)
     return {
-        "cluster_summary": cluster_summary.reset_index().to_dict(orient='records'),
-        "hot_products": hot_products.to_dict(orient='records')
+        "cluster_summary": cluster_summary_df.to_dict(orient='records'),
+        "product_points": product_agg_df.to_dict(orient='records'),
+        "elbow_data": elbow_data,
+        "elbow_chart_json": fig_elbow.to_json(),
+        "scatter_3d_chart_json": fig_3d.to_json()
     }
 
 def perform_sentiment_analysis(df: pd.DataFrame) -> dict:
-    """情感分析函数，返回包含分析结果的字典"""
-    
+    """
+    【优化版】情感分析函数，使用并行处理
+    """
     def find_review_column(df_to_check: pd.DataFrame) -> str | None:
-        """在 DataFrame 中智能查找最可能包含评论文本的列名。"""
-        # 1. 最高优先级：检查常见的标准列名
         priority_cols = ['reviews.text', 'review_text', 'content', 'comment', 'review']
         for p_col in priority_cols:
             if p_col in df_to_check.columns and df_to_check[p_col].dropna().astype(str).str.strip().any():
                 return p_col
         
-        # 2. 次高优先级：模糊匹配列名中包含关键词的列
         possible_cols = [col for col in df_to_check.columns if any(key in str(col).lower() for key in ['text', 'review', 'content', 'comment'])]
         if possible_cols:
             string_cols = [col for col in possible_cols if df_to_check[col].dtype == 'object']
             if string_cols:
                 return max(string_cols, key=lambda col: df_to_check[col].dropna().astype(str).str.len().mean())
         
-        # 3. 最低优先级：遍历所有字符串类型的列
         object_cols = df_to_check.select_dtypes(include=['object']).columns
         if not object_cols.empty:
             for col in object_cols:
                 if df_to_check[col].dropna().astype(str).str.strip().any():
                     return col
-                    
-        # 4. 如果都找不到，返回 None
         return None
 
     review_column_name = find_review_column(df)
@@ -415,7 +544,7 @@ def perform_sentiment_analysis(df: pd.DataFrame) -> dict:
     df = df[df[review_column_name].str.strip() != 'None'].copy()
     
     analyzer = SentimentIntensityAnalyzer()
-    df['sentiment'] = df[review_column_name].apply(lambda text: analyzer.polarity_scores(text)['compound'])
+    df['sentiment'] = df[review_column_name].parallel_apply(lambda text: analyzer.polarity_scores(text)['compound'])
     
     def sentiment_to_rating(sentiment):
         if sentiment >= 0.5: return 5
@@ -433,3 +562,258 @@ def perform_sentiment_analysis(df: pd.DataFrame) -> dict:
         "reviews": df[['rating','review_text','sentiment']].to_dict(orient='records'),
         "average_sentiment": df['sentiment'].mean()
     }
+
+# ==============================================================================
+# Final Report Generation 模块
+# ==============================================================================
+
+def generate_final_html_report(
+    market_report: str,
+    validation_summary: str,
+    action_plan: str,
+    sentiment_report: str | None = None,
+    forecast_chart_json: str | None = None,
+    clustering_data: dict | None = None,
+    elbow_chart_json: str | None = None,
+    scatter_3d_chart_json: str | None = None,
+    basket_analysis_data: list | None = None
+) -> str:
+    """
+    【最终升级版】将所有分析内容（包括购物篮分析）整合成HTML报告。
+    """
+
+    css_styles = """
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #111827;
+            color: #d1d5db;
+        }
+        .container {
+            max-width: 900px;
+            margin: 20px auto;
+            padding: 20px;
+            background-color: #1f2937;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            text-align: center;
+            border-bottom: 1px solid #374151;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            color: #ffffff;
+            font-size: 2.5em;
+            margin: 0;
+        }
+        .header p {
+            color: #9ca3af;
+            font-size: 1.1em;
+        }
+        .section {
+            background-color: #374151;
+            padding: 25px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+        }
+        .section h2 {
+            font-size: 1.8em;
+            color: #ffffff;
+            border-bottom: 2px solid #4f46e5;
+            padding-bottom: 10px;
+            margin-top: 0;
+        }
+        .markdown-content h3 { font-size: 1.5em; color: #e5e7eb; }
+        .markdown-content h4 { font-size: 1.2em; color: #d1d5db; }
+        .markdown-content p, .markdown-content li { line-height: 1.7; }
+        .markdown-content a { color: #818cf8; text-decoration: none; }
+        .markdown-content a:hover { text-decoration: underline; }
+        .markdown-content blockquote {
+            border-left: 4px solid #4f46e5;
+            padding-left: 15px;
+            margin-left: 0;
+            color: #9ca3af;
+            font-style: italic;
+        }
+        .markdown-content table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        .markdown-content th, .markdown-content td {
+            border: 1px solid #4b5563;
+            padding: 12px;
+            text-align: left;
+        }
+        .markdown-content th {
+            background-color: #4b5563;
+            color: #ffffff;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 40px;
+            font-size: 0.9em;
+            color: #6b7280;
+        }
+    </style>
+    """
+
+    md_converter = markdown2.Markdown(extras=["tables", "fenced-code-blocks"])
+    market_report_html = md_converter.convert(market_report)
+    action_plan_html = md_converter.convert(action_plan)
+    sentiment_report_html = md_converter.convert(sentiment_report) if sentiment_report else ""
+
+    forecast_chart_html = ""
+    if forecast_chart_json:
+        try:
+            fig = go.Figure(json.loads(forecast_chart_json))
+            forecast_chart_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
+        except Exception:
+            forecast_chart_html = "<p><i>销售预测图表生成失败。</i></p>"
+    
+    # 手肘图：白底
+    elbow_chart_html = ""
+    if elbow_chart_json:
+        try:
+            fig = go.Figure(json.loads(elbow_chart_json))
+            fig.update_layout(
+                template='plotly_white',
+                paper_bgcolor="#ffffff",
+                plot_bgcolor="#ffffff",
+                font=dict(color="#111827")
+            )
+            elbow_chart_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
+        except Exception:
+            elbow_chart_html = "<p><i>手肘法图表生成失败。</i></p>"
+    
+    # 3D 图：强制白底（更强覆盖）
+    scatter_3d_chart_html = ""
+    if scatter_3d_chart_json:
+        try:
+            fig = go.Figure(json.loads(scatter_3d_chart_json))
+            # 覆盖模板和颜色，确保不受 plotly_dark 影响
+            fig.update_layout(template='plotly_white')
+            fig.layout.template = 'plotly_white'  # 再次显式指定
+            fig.update_layout(
+                paper_bgcolor="#ffffff",
+                plot_bgcolor="#ffffff",
+                font=dict(color="#111827"),
+                scene=dict(
+                    bgcolor="#ffffff",
+                    xaxis=dict(
+                        backgroundcolor="#ffffff",
+                        gridcolor="#e5e7eb",
+                        zerolinecolor="#9ca3af",
+                        showbackground=True
+                    ),
+                    yaxis=dict(
+                        backgroundcolor="#ffffff",
+                        gridcolor="#e5e7eb",
+                        zerolinecolor="#9ca3af",
+                        showbackground=True
+                    ),
+                    zaxis=dict(
+                        backgroundcolor="#ffffff",
+                        gridcolor="#e5e7eb",
+                        zerolinecolor="#9ca3af",
+                        showbackground=True
+                    ),
+                ),
+            )
+            scatter_3d_chart_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
+        except Exception:
+            scatter_3d_chart_html = "<p><i>3D聚类图表生成失败。</i></p>"
+
+    clustering_tables_html = ""
+    if clustering_data:
+        try:
+            summary_df = pd.DataFrame(clustering_data.get('cluster_summary', []))
+            all_products_df = pd.DataFrame(clustering_data.get('product_points', []))
+            
+            if not summary_df.empty:
+                clustering_tables_html += "<h4>各商品簇特征均值</h4>"
+                clustering_tables_html += summary_df.to_html(classes="markdown-content", border=0, index=False)
+
+                hot_cluster = summary_df[summary_df['is_hot_cluster'] == True]
+                if not hot_cluster.empty and not all_products_df.empty:
+                    hot_cluster_id = hot_cluster.iloc[0]['cluster']
+                    hot_products_df = all_products_df[all_products_df['cluster'] == hot_cluster_id].sort_values(by='total_amount', ascending=False)
+                    
+                    clustering_tables_html += f"<h4 style='margin-top: 20px;'>热销商品列表 (簇 {int(hot_cluster_id)})</h4>"
+                    clustering_tables_html += hot_products_df[['SKU', 'total_amount', 'total_qty', 'order_count', 'cluster']].to_html(classes="markdown-content", border=0, index=False)
+        except Exception:
+            clustering_tables_html = "<p><i>聚类分析表格生成失败。</i></p>"
+            
+    basket_analysis_html = ""
+    if basket_analysis_data:
+        try:
+            basket_df = pd.DataFrame(basket_analysis_data)
+            if not basket_df.empty:
+                basket_analysis_html += "<h4 style='margin-top: 20px;'>购物篮分析 (关联规则)</h4>"
+                basket_analysis_html += "<p>提升度(lift) > 1 表示强关联性，是捆绑销售或交叉营销的绝佳机会。</p>"
+                basket_analysis_html += basket_df.to_html(classes="markdown-content", border=0, index=False)
+        except Exception:
+            basket_analysis_html = "<p><i>购物篮分析表格生成失败。</i></p>"
+
+    final_html = f"""
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>WeaveAI 综合分析报告</title>
+        {css_styles}
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>📈 WeaveAI 综合分析报告</h1>
+                <p>数据驱动决策，洞见商业未来</p>
+            </div>
+
+            <div class="section">
+                <h2>第一部分：市场机会洞察 (Insight)</h2>
+                <div class="markdown-content">
+                    {market_report_html}
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>第二部分：内部数据验证 (Validation)</h2>
+                <div class="markdown-content">
+                    <h4>验证摘要</h4>
+                    <p>{validation_summary or "<i>未提供验证摘要。</i>"}</p>
+                    
+                    {forecast_chart_html}
+                    
+                    {'<hr style="border-color: #4b5563; margin: 30px 0;">' if (elbow_chart_html or scatter_3d_chart_html or clustering_tables_html or basket_analysis_html) else ''}
+                    {elbow_chart_html}
+                    {scatter_3d_chart_html}
+                    {clustering_tables_html}
+                    {basket_analysis_html}
+                    
+                    {'<hr style="border-color: #4b5563; margin: 30px 0;">' if sentiment_report_html else ''}
+                    {f'<h4>AI 评论深度分析报告</h4>{sentiment_report_html}' if sentiment_report_html else ''}
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>第三部分：季度行动计划 (Action Plan)</h2>
+                <div class="markdown-content">
+                    {action_plan_html}
+                </div>
+            </div>
+            
+            <div class="footer">
+                <p>报告生成于 {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                <p>&copy; WeaveAI智能分析助手</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return final_html

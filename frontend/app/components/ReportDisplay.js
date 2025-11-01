@@ -8,6 +8,8 @@ import debounce from 'lodash/debounce';
 
 export default function ReportDisplay({ 
   profile, 
+  enableWebsearch,
+  startTrigger,
   onGenerationComplete,
   onError
 }) {
@@ -21,7 +23,7 @@ export default function ReportDisplay({
   );
 
   useEffect(() => {
-    if (!profile) return;
+    if (!profile || !startTrigger) return;
 
     const abortController = new AbortController();
 
@@ -32,7 +34,10 @@ export default function ReportDisplay({
         const response = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/api/v1/reports/market-insight`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(profile),
+          body: JSON.stringify({
+            ...profile,
+            use_websearch: enableWebsearch
+          }),
           signal: abortController.signal,
         });
 
@@ -110,7 +115,7 @@ export default function ReportDisplay({
       abortController.abort();
       debouncedSetStreamedContent.cancel();
     };
-  }, [profile, onGenerationComplete, onError, debouncedSetStreamedContent]); 
+  }, [profile, enableWebsearch, startTrigger, onGenerationComplete, onError, debouncedSetStreamedContent]); 
 
   return (
     <div className="space-y-6">

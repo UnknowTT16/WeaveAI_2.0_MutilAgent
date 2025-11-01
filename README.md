@@ -1,169 +1,208 @@
 # 📈 WeaveAI 智能分析助手
 
-> 告别感觉，让数据与AI为您引航
+> 告别感觉，让数据与 AI 为您引航。  
+> 一个把「机会洞察 → 数据验证 → 行动计划 → 一键导出报告」整合到同一工作台的前后端一体化项目。
 
-WeaveAI 是一个全栈 AI 驱动的 Web 应用，旨在为跨境电商卖家和品牌方提供从市场机会洞察、内部数据验证到生成可执行行动计划的端到端战略支持。
+WeaveAI 面向跨境卖家与品牌团队，支持：
+- **🤖 机会洞察（Insight）**：基于「战略档案」自动生成市场洞察，前端实时渲染思考过程与 Markdown 报告。
+- **📊 自我验证（Validation）**：上传**销售/评论**数据，内置 LSTM 预测、KMeans 聚类、Apriori 购物篮分析、VADER 情感分析等。
+- **🚀 行动计划（Action）**：把洞察 + 验证摘要 + 评论洞察合并，生成可落地的季度路线图，并可**一键导出 HTML 报表**（保存在后端静态目录可直接分享）。
 
-## ✨ 核心功能
+---
 
-本项目通过一个引导式的三步工作流，将复杂的战略分析流程化、自动化：
+## 📁 目录结构
 
-1.  **🤖 第一步：机会洞察 (Insight)**
+```text
+WeaveAI/
+├── backend/
+│   ├── main.py              # FastAPI 入口、路由与静态导出逻辑
+│   ├── WAIapp_core.py       # AI 生成与数据分析核心、最终 HTML 报告模板
+│   ├── requirements.txt     # Python 依赖清单
+│   ├── static/
+│   │   └── reports/         # 已生成的 HTML 报告（通过 /reports/ 访问）
+│   └── .env                 # ARK_API_KEY 等后端环境变量
+└── frontend/
+    ├── app/
+    │   ├── page.js          # 三步工作流主视图与状态
+    │   ├── layout.js        # 根布局（字体、样式注入）
+    │   ├── globals.css      # Tailwind 基础样式（暗色系）
+    │   └── components/      # ReportDisplay / ValidationDashboard / ActionPlanner / ...
+    ├── package.json         # 前端依赖
+    ├── tailwind.config.mjs  # Tailwind 配置（含 typography 插件）
+    ├── next.config.mjs      # Next.js 配置
+    └── .env.local           # NEXT_PUBLIC_API_BASE_URL
+```
 
-      * 用户提交一个“战略档案”，包括目标市场、核心品类、卖家类型和定价区间。
-      * AI Agent（基于 Volcengine Ark）会接收此档案，并流式（Streaming）生成一份包含宏观环境、细分品类机会点和竞争格局分析的深度市场报告。
-      * 前端使用 `react-markdown` 实时渲染AI的“思考过程”和“正式报告”。
+参考：后端挂载静态目录 `/reports`、数据模型与各 API 定义、静态样式与白底图表导出等实现已在仓库源码中体现。
 
-2.  **📊 第二步：自我验证 (Validation)**
-
-      * 用户上传自己的历史销售数据和（可选的）评论数据（支持 `.csv` 和 `.parquet` 格式）。
-      * 应用提供一个交互式仪表盘，执行三种核心的数据分析：
-          * **销售预测**：使用 Keras/TensorFlow 构建的 **LSTM** 模型预测未来30天的销售额，并使用 `Plotly.js` 进行可视化。
-          * **热销品聚类**：使用 **KMeans** 算法对商品进行聚类，识别出“热销商品簇”和“潜力商品簇”。
-          * **情感分析**：使用 `vaderSentiment` 分析评论，并允许用户通过滑块筛选特定星级的评论。
-      * **嵌套 AI 功能**：用户可以基于筛选后的评论，再次调用 AI 生成一份深入的“用户洞察分析报告”。
-      * 完成后，此步骤会生成一份“内部数据验证摘要”。
-
-3.  **🚀 第三步：行动计划 (Action)**
-
-      * 应用将\*\*第一步的“市场洞察报告”**和**第二步的“验证摘要”\*\*作为上下文，提交给专职“行动规划”的 AI Agent。
-      * AI Agent 会生成一份高度具体、可落地的季度行动路线图，涵盖产品研发、市场营销和供应链运营。
+---
 
 ## 🛠️ 技术栈
 
-本项目采用前后端分离的架构。
+**Frontend（Next.js + React）**
+- Tailwind CSS（含 `@tailwindcss/typography`），暗色系 UI 基调；
+- 可视化：`plotly.js` / `react-plotly.js`（客户端动态加载）。
+- Markdown 渲染：`react-markdown` + `remark-gfm`（统一在 UI 中安全展示）。
 
-### **Frontend** (Next.js)
+**Backend（FastAPI）**
+- 路由：流式生成洞察/行动计划/评论摘要、静态导出 HTML 报告；
+- 数据分析：Pandas / NumPy、Scikit-learn（KMeans）、TensorFlow（LSTM）、VaderSentiment、mlxtend（Apriori）等。依赖见 `requirements.txt`。
 
-  * **框架**: Next.js 15.5.6, React 19.1.0 (App Router)
-  * **状态管理**: React Hooks (`useState`, `useMemo`, `useEffect`)
-  * **UI / 样式**: TailwindCSS, `@tailwindcss/typography` (用于渲染 Markdown)
-  * **数据可视化**: `Plotly.js`, `react-plotly.js`
-  * **UI 组件**: `rc-slider` (用于价格/星级筛选)
-  * **Markdown 渲染**: `react-markdown`, `remark-gfm`
+---
 
-### **Backend** (FastAPI)
+## 🚀 快速开始（本地开发）
 
-  * [cite\_start]**框架**: FastAPI [cite: 1][cite\_start], Uvicorn [cite: 1]
-  * [cite\_start]**AI Agent**: `volcengine-python-sdk[ark]` (调用 `doubao-seed` 模型) [cite: 1]
-  * [cite\_start]**机器学习 (预测)**: TensorFlow / Keras (LSTM) [cite: 1]
-  * [cite\_start]**机器学习 (聚类)**: Scikit-learn (KMeans) [cite: 1]
-  * [cite\_start]**机器学习 (情感)**: `vaderSentiment` [cite: 1]
-  * [cite\_start]**数据处理**: Pandas [cite: 1][cite\_start], Numpy [cite: 1][cite\_start], Openpyxl [cite: 1][cite\_start], Pyarrow [cite: 1]
-  * [cite\_start]**环境变量**: `python-dotenv` [cite: 1]
-
-## 📁 项目结构
-
-```
-WeaveAI_迭代/
-├── backend/                 
-│   ├── .env                  # ◀ 存储 ARK_API_KEY
-│   ├── main.py               # ◀ FastAPI 路由定义
-│   ├── WAIapp_core.py        # ◀ 核心 AI Agent 和数据分析逻辑
-[cite_start]│   └── requirements.txt      # ◀ Python 依赖 [cite: 1]
-└── frontend/                
-    ├── .env.local            # ◀ 存储 NEXT_PUBLIC_API_BASE_URL
-    ├── app/
-    │   ├── components/       # ◀ React UI 组件
-    │   │   ├── ProfileForm.js       
-    │   │   ├── ReportDisplay.js     
-    │   │   ├── ValidationDashboard.js 
-    │   │   ├── ActionPlanner.js     
-    │   │   ├── SentimentAnalysis.js 
-    │   │   ├── StepsIndicator.js  
-    │   │   └── ...
-    │   ├── page.js           # ◀ 核心页面和状态管理"大脑"
-    │   ├── layout.js         # ◀ 根布局和字体
-    │   └── globals.css       # ◀ Tailwind CSS 基础样式
-    ├── package.json          # ◀ Node.js 依赖
-    ├── tailwind.config.mjs   # ◀ Tailwind 配置
-    └── next.config.mjs       # ◀ Next.js 配置
-```
-
-## 🚀 本地开发与运行
-
-您需要分别启动后端服务和前端应用。
-
-### 1\. 启动 Backend (FastAPI)
+### 1) 启动 Backend（FastAPI）
 
 ```bash
-# 1. 进入后端目录
 cd backend
-
-# 2. (推荐) 创建并激活虚拟环境
 python -m venv venv
-# On macOS/Linux:
+# macOS / Linux
 source venv/bin/activate
-# On Windows:
-.\venv\Scripts\activate
+# Windows
+venv\Scripts\Activate.ps1
 
-# 3. 安装 Python 依赖
-[cite_start]pip install -r requirements.txt [cite: 1]
+pip install -r requirements.txt
+# 写入你在火山引擎 Ark 的密钥
+echo ARK_API_KEY="你的ArkKey" > .env
 
-# 4. 创建环境变量文件
-# 在 backend 目录下新建一个 .env 文件
-# 并添加您的 Volcengine Ark API 密钥
-echo "ARK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx" > .env
-
-# 5. 启动 FastAPI 服务
-# (服务将运行在 http://127.0.0.1:8000)
+# 启动服务：默认 http://127.0.0.1:8000
 uvicorn main:app --reload
 ```
 
-### 2\. 启动 Frontend (Next.js)
+> 首次运行会自动创建并挂载 `static/reports` 目录用于存放 HTML 报告，可通过 `http://127.0.0.1:8000/reports/xxx.html` 直接访问。
+
+### 2) 启动 Frontend（Next.js）
 
 ```bash
-# 1. (在新的终端中) 进入前端目录
 cd frontend
-
-# 2. 安装 Node.js 依赖
 npm install
+echo NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000 > .env.local
 
-# 3. 创建环境变量文件
-# 在 frontend 目录下新建一个 .env.local 文件
-# 指向您本地的 FastAPI 服务地址
-echo "NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000" > .env.local
-
-# 4. 启动 Next.js 开发服务器
+# dev 启动：默认 http://localhost:3000
 npm run dev
-
-# 5. 在浏览器中打开 http://localhost:3000
 ```
+
+---
+
+## 📡 后端 API 一览
+
+### AI 报告（流式返回 `text/plain`）
+| Endpoint | 描述 | 请求体关键字段 |
+|---|---|---|
+| `POST /api/v1/reports/market-insight` | 生成市场洞察（含思考过程与 Markdown 报告流式输出） | `target_market` `supply_chain` `seller_type` `min_price` `max_price` |
+| `POST /api/v1/reports/action-plan` | 生成行动计划（将洞察与验证摘要合并） | `market_report` `validation_summary` |
+| `POST /api/v1/reports/review-summary` | 评论洞察摘要（基于正/负样本） | `positive_reviews` `negative_reviews` |
+
+### 数据分析（返回 JSON）
+| Endpoint | 功能 | 上传内容 |
+|---|---|---|
+| `POST /api/v1/data/forecast-sales` | LSTM 销售预测，返回 Plotly JSON | 销售数据（`.csv/.parquet`） |
+| `POST /api/v1/data/product-clustering` | KMeans 聚类 + 购物篮分析，返回簇摘要/商品点/图表 JSON | 销售数据（`.csv/.parquet`） |
+| `POST /api/v1/data/sentiment-analysis` | 评论情感分析，返回评分与精选样本 | 评论数据（`.csv/.parquet`） |
+
+> **说明**：旧 README 中提到的 `POST /api/v1/reports/export-pdf` **当前未在后端实现**，请以本节表格与 `main.py` 源码为准。
+
+---
+
+## 🧭 前端工作流（3 步）
+
+1. **机会洞察**：提交“战略档案”后，前端通过 `ReportDisplay` 组件与后端 `/market-insight` 建立流式连接，实时渲染**思考过程**与**正式报告**。
+2. **数据验证**：在 `ValidationDashboard` 上传销售/评论数据，调用后端三个数据分析端点，并将结果回传给父级 `page.js` 汇总为**验证摘要**。
+3. **行动计划与导出**：`ActionPlanner` 调用 `/action-plan` 生成 Markdown 版行动计划；随后把洞察、验证摘要和图表 JSON 传给 `/generate-and-save-report` 生成**可视化 HTML 报告**（后端静态 URL 可分享）。
+
+---
+
+## 🧪 请求示例
+
+### 1) 生成市场洞察（流式）
+```bash
+curl -N -X POST http://127.0.0.1:8000/api/v1/reports/market-insight   -H "Content-Type: application/json"   -d '{
+    "target_market": "DE",
+    "supply_chain": "FBA",
+    "seller_type": "Brand",
+    "min_price": 30,
+    "max_price": 90
+  }'
+```
+
+### 2) LSTM 销售预测（上传 CSV）
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/data/forecast-sales   -F "file=@sales.csv"
+```
+
+### 3) 生成最终 HTML 报告（整合导出）
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/reports/generate-and-save-report   -H "Content-Type: application/json"   -d '{
+    "market_report": "...(Markdown)...",
+    "validation_summary": "内部数据验证要点…",
+    "action_plan": "...(Markdown)...",
+    "forecast_chart_json": "{...}",
+    "clustering_data": {"cluster_summary": [...], "product_points": [...]},
+    "elbow_chart_json": "{...}",
+    "scatter_3d_chart_json": "{...}",
+    "basket_analysis_data": [...]
+  }'
+```
+
+成功后返回：
+```json
+{ "report_url": "http://127.0.0.1:8000/reports/report_xxx.html" }
+```
+
+---
+
+## 🎨 报告样式与图表底色
+
+- 最终导出的 HTML 报告使用**暗色主题**正文，但关键图表（手肘图、3D 聚类）在导出时强制**白底**，保证打印/分享可读性。实现方式：Plotly `template='plotly_white'` + `paper_bgcolor/plot_bgcolor` 强制白色。  
+- HTML 报告模板包含标题、三大章节、表格样式、页脚时间戳等，样式统一封装在 `WAIapp_core.py`。
+
+---
 
 ## 🔑 环境变量
 
-### `backend/.env`
+| 文件 | 变量 | 说明 |
+|---|---|---|
+| `backend/.env` | `ARK_API_KEY` | 必填：火山引擎 Ark API Key |
+| （可选） | `CHROME_PATH` | 指向本机 Chrome/Edge，可用于后续接入 PDF 导出 |
+| `frontend/.env.local` | `NEXT_PUBLIC_API_BASE_URL` | 前端访问的后端地址（如 `http://127.0.0.1:8000`） |
 
-  * `ARK_API_KEY`: **[必需]** 您的 Volcengine Ark API 密钥，用于驱动所有 AI Agent 功能。
+> 依赖清单见 `requirements.txt`（FastAPI / Pandas / scikit-learn / TensorFlow / VaderSentiment / mlxtend / Plotly / PyArrow / OpenPyXL / markdown2 / pandarallel / volcengine-ark 等）。
 
-### `frontend/.env.local`
+---
 
-  * `NEXT_PUBLIC_API_BASE_URL`: **[必需]** 您的后端 FastAPI 服务地址。默认为 `http://127.0.0.1:8000`。
+## 🧰 常见问题（FAQ）
 
-## 📡 API Endpoints
+- **为什么导出后能直接分享？**  
+  后端把 HTML 报告写入 `static/reports/` 并挂载为 `/reports` 静态目录，返回可直接访问的 URL。
 
-所有 API 均由 `backend/main.py` 提供。
+- **为什么我的图表是白底而页面是暗色？**  
+  为保证打印/分享，对关键图表运行时强制白底（白纸打印更友好）。实现细节见 `WAIapp_core.py`。
 
-### AI 报告 (流式响应)
+- **README 里以前提过有 `/export-pdf` 吗？**  
+  旧说明里提到过，但当前后端未实现该端点，请以 `main.py` 为准。
 
-  * `POST /api/v1/reports/market-insight`
-      * **Body**: `UserProfile` JSON 对象 (市场, 品类, 价格等)。
-      * **Response**: `StreamingResponse` (text/plain) - 流式返回市场洞察 Markdown 报告。
-  * `POST /api/v1/reports/action-plan`
-      * **Body**: `ActionPlanRequest` JSON 对象 (包含 `market_report` 和 `validation_summary`)。
-      * **Response**: `StreamingResponse` (text/plain) - 流式返回行动计划 Markdown 报告。
-  * `POST /api/v1/reports/review-summary`
-      * **Body**: `ReviewAnalysisRequest` JSON 对象 (包含正/负评论样本)。
-      * **Response**: `StreamingResponse` (text/plain) - 流式返回评论洞察 Markdown 报告。
+---
 
-### 数据分析 (JSON 响应)
+## 🤝 贡献
 
-  * `POST /api/v1/data/forecast-sales`
-      * **Body**: `UploadFile` (销售数据 .csv/.parquet)。
-      * **Response**: `JSONResponse` - 包含 Plotly 图表 JSON 数据的 LSTM 预测结果。
-  * `POST /api/v1/data/product-clustering`
-      * **Body**: `UploadFile` (销售数据 .csv/.parquet)。
-      * **Response**: `JSONResponse` - 包含聚类摘要和热销品列表的 KMeans 分析结果。
-  * `POST /api/v1/data/sentiment-analysis`
-      * **Body**: `UploadFile` (评论数据 .csv/.parquet)。
-      * **Response**: `JSONResponse` - 包含情感分析结果（平均分、评论列表）。
+欢迎 PR 与 Issue！建议在提交前先跑通：
+1. 三个流式/分析端点最小样例；
+2. 生成一次最终 HTML 报告并在浏览器打开验证；
+3. 若改动前端交互，确保 `page.js / components/*` 的状态流转一致（见源码）。
+
+---
+
+## 📜 许可证
+
+MIT（可按团队要求替换）。
+
+---
+
+### 依据仓库源文件（可溯源片段）
+
+- 后端 API 与静态导出逻辑：`backend/main.py`。  
+- 最终 HTML 报告模板与图表白底控制：`backend/WAIapp_core.py`。  
+- 前端流式渲染与调用关系：`frontend/app/components/ReportDisplay.js`、`ValidationDashboard.js`、`ActionPlanner.js`、`page.js`。  
+- 样式与主题：`tailwind.config.mjs`、`globals.css`。  
+- 依赖清单：`requirements.txt`。

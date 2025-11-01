@@ -7,17 +7,25 @@ import DataTable from './DataTable';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-export default function SentimentAnalysis({ analysisResult }) {
+// 【修改】接收来自父组件的新 props
+export default function SentimentAnalysis({ 
+  analysisResult,
+  aiReport,
+  setAiReport,
+  isGenerating,
+  setIsGenerating,
+  error,
+  setError
+}) {
   const { reviews, average_sentiment } = analysisResult;
   
-  // 1. 【核心优化】: 默认星级范围设置为 [4, 5]
   const [ratingRange, setRatingRange] = useState([4, 5]);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [aiReport, setAiReport] = useState({ thinking: '', report: '' });
-  const [error, setError] = useState('');
-  
-  // 2. 【核心优化】: 新增 state 来控制是否显示全部评论
   const [showAllReviews, setShowAllReviews] = useState(false);
+
+  // 【移除】此组件不再需要管理这些 state
+  // const [isGenerating, setIsGenerating] = useState(false);
+  // const [aiReport, setAiReport] = useState({ thinking: '', report: '' });
+  // const [error, setError] = useState('');
 
   // 首先根据滑块范围筛选出所有符合条件的评论
   const filteredReviews = useMemo(() => {
@@ -55,7 +63,7 @@ export default function SentimentAnalysis({ analysisResult }) {
     const negativeText = negativeSamples.map(r => `- ${r.review_text}`).join("\n");
     
     try {
-        const response = await fetch('http://127.0.0.1:8000/api/v1/reports/review-summary', {
+        const response = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/api/v1/reports/review-summary`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -98,7 +106,7 @@ export default function SentimentAnalysis({ analysisResult }) {
     } finally {
         setIsGenerating(false);
     }
-  }, [filteredReviews]);
+  }, [filteredReviews, setError, setIsGenerating, setAiReport]); // 【修改】更新依赖项
 
   return (
     <div className="space-y-8">
@@ -121,14 +129,12 @@ export default function SentimentAnalysis({ analysisResult }) {
       </div>
       
       <div>
-        {/* 3. 【核心优化】: 更新提示文本 */}
         <p className="text-sm text-gray-400 mb-4">
           在 **{filteredReviews.length}** 条评分为 **{ratingRange[0]}** 到 **{ratingRange[1]}** 星的评论中，当前显示 **{displayedReviews.length}** 条。
         </p>
         
         <DataTable title="评论详情" data={displayedReviews} />
-
-        {/* 4. 【核心优化】: 只有当筛选出的评论超过20条时，才显示“查看全部”选项 */}
+        
         {filteredReviews.length > 20 && (
           <div className="mt-4 flex items-center">
             <input
