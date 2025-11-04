@@ -11,6 +11,7 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
 EOF
 
 RUN apt-get update && \
+    apt-get dist-upgrade -y && \
     apt-get install -y --no-install-recommends \
         build-essential \
         libgomp1 \
