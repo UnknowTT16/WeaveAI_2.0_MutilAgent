@@ -8,8 +8,8 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources && \
 deb https://mirrors.aliyun.com/debian/ bookworm main contrib non-free non-free-firmware
 deb https://mirrors.aliyun.com/debian/ bookworm-updates main contrib non-free non-free-firmware
 deb https://mirrors.aliyun.com/debian-security bookworm-security main contrib non-free non-free-firmware
-EOF && \
-    apt-get update && \
+EOF
+RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
         libgomp1 \
