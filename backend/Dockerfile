@@ -12,12 +12,12 @@ EOF
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        build-essential=12.9 \
+        build-essential \
         libgomp1 \
         chromium \
-        perl-base=5.36.0-7+deb12u3 && \
+        perl-base && \
     rm -rf /var/lib/apt/lists/*
-
+    
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     -i https://pypi.tuna.tsinghua.edu.cn/simple
