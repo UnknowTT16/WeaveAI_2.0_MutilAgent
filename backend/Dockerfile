@@ -5,9 +5,9 @@ ENV PYTHONUNBUFFERED=1
 
 RUN rm -f /etc/apt/sources.list.d/debian.sources && \
     cat <<'EOF' > /etc/apt/sources.list
-deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
-deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
-deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
+deb https://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
+deb https://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
+deb https://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
 EOF
 
 RUN apt-get update && \
