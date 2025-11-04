@@ -3,21 +3,22 @@ FROM python:3.11-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
+# 使用官方 Debian bookworm 源
 RUN rm -f /etc/apt/sources.list.d/debian.sources && \
     cat <<'EOF' > /etc/apt/sources.list
-deb https://mirrors.aliyun.com/debian/ bookworm main contrib non-free non-free-firmware
-deb https://mirrors.aliyun.com/debian/ bookworm-updates main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
 deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
 EOF
 
+# 正常安装依赖
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
         libgomp1 \
-        chromium \
-        perl-base && \
+        chromium && \
     rm -rf /var/lib/apt/lists/*
-    
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     -i https://pypi.tuna.tsinghua.edu.cn/simple
