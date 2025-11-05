@@ -3,11 +3,21 @@ FROM python:3.11-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
-RUN apt-get update && \
+RUN set -eux; \
+    rm -f /etc/apt/sources.list.d/debian.sources; \
+    cat <<'EOF' > /etc/apt/sources.list
+deb https://mirrors.aliyun.com/debian trixie main contrib non-free non-free-firmware
+deb https://mirrors.aliyun.com/debian trixie-updates main contrib non-free non-free-firmware
+deb https://mirrors.aliyun.com/debian-security trixie-security main contrib non-free non-free-firmware
+EOF
+
+RUN set -eux; \
+    apt-get update; \
     apt-get install -y --no-install-recommends \
         build-essential \
         libgomp1 \
-        chromium && \
+        chromium; \
+    apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
