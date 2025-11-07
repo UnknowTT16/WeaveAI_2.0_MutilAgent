@@ -30,3 +30,8 @@ yarn-error.log*
 # Security keys
 weaveai-key.pem
 *.pem
+
+#new additions
+static/reports/
+node20-alpine.tar
+python311-slim.tar
