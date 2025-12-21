@@ -1,0 +1,260 @@
+# backend/WAIapp_core.py
+
+import os
+import pandas as pd
+import numpy as np
+import warnings
+from dotenv import load_dotenv
+from volcenginesdkarkruntime import Ark
+import markdown2
+import json
+from pandarallel import pandarallel
+
+# 分析�?
+from sklearn.cluster import KMeans, MiniBatchKMeans
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.ensemble import IsolationForest
+from sklearn.neighbors import LocalOutlierFactor
+from keras.models import Sequential
+from keras.layers import LSTM, Dense, Input
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from pandas.errors import SettingWithCopyWarning, DtypeWarning
+from mlxtend.preprocessing import TransactionEncoder
+from mlxtend.frequent_patterns import apriori, association_rules, fpgrowth
+
+# 可视化库
+import plotly.graph_objects as go
+import plotly.express as px
+
+# 加载环境变量
+load_dotenv()
+
+# (关键) 解决 KMeans 内存泄漏警告
+os.environ['OMP_NUM_THREADS'] = '1'
+
+# 初始�?pandarallel，禁用进度条以保持日志清�?
+pandarallel.initialize(progress_bar=False) 
+
+# 抑制特定的Pandas警告
+warnings.filterwarnings('ignore', category=SettingWithCopyWarning)
+warnings.filterwarnings('ignore', category=DtypeWarning)
+
+# ==============================================================================
+# AI Agent 模块
+# ==============================================================================
+
+def get_ark_client():
+    """获取并返回一个配置好�?Ark 客户端实�?""
+    api_key = os.getenv("ARK_API_KEY")
+    if not api_key:
+        raise ValueError("ARK_API_KEY not found in environment variables.")
+    return Ark(api_key=api_key)
+
+def generate_full_report_stream(user_profile: dict):
+    """【核心】生成主市场分析报告的流式函�?""
+    ark_client = get_ark_client()
+    market = user_profile['target_market']
+    categories = user_profile['supply_chain']
+    seller = user_profile['seller_type']
+    price_range = f"${user_profile['min_price']} - ${user_profile['max_price']}"
+
+    system_prompt = f"""
+    你是 "WeaveAI" 应用内的一位高级战略顾问，你的报告是为一位计划进�?{market}'市场�?{seller}'，他/她专注于'{categories}'品类，目标售价在'{price_range}'�?
+    你的报告必须专业、详尽、数据驱动，并使用精美的Markdown格式�?
+
+    **第一阶段：输出思考过�?*
+    在正式开始报告前，你必须先输出你的思考过程。这部分内容必须�?"我需�?.." �?"首先..." 开始，概述你将如何为用户分析。不要使用任何Markdown标题�?
+    
+    **重要指令 1�?* 在思考过程结束后，你必须另起一行，并只输出 `<<<<THINKING_ENDS>>>>` 这个特殊标记�?
+    
+    **重要指令 2�?* 在上一个标记之后，你必须立即另起一行并输出 `<<<<REPORT_STARTS>>>>`，然后才能开始生成严格按照以下Markdown格式的正式报告，中间不能有任何其他文字�?
+
+    **第二阶段：输出正式报�?*
+    ---
+    
+    ## 报告摘要 (Executive Summary)
+    *   在此处用2-3个要点，**加粗**核心关键词，高度概括整个报告的核心发现和最终建议�?
+    
+    ---
+    
+    ## 🎯 市场机遇洞察 (Market Opportunities)
+    
+    ### 一�?宏观环境分析
+    1.  **市场潜力与趋�?*: 结合**量化数据**解释增长空间 (必须注明来源和年�?�?
+    2.  **文化与消费习�?*: 【核心】深入分析当地文化、节假日、生活方式如何影�?{categories}'品类的消费偏好�?
+    3.  **法律法规与关�?*: 【核心】明确指出进口限制、所需**具体认证** (如CE, RoHS) 和大致的关税税率�?
+    
+    ### 二�?高潜力细分品类机会点
+    *   你必须利用网络搜索，识别�?个最符合用户画像的细分机会�?
+    *   对于每一个机会点，必须严格按照以下模板进行分析：
+    
+    #### 机会�?1: [在此处填写具体品类名称]
+    *   **产品定义:** 清晰描述这个品类的核心功能、形态和目标用户�?
+    *   **需求驱动与市场规模:** 解释为什么当地市场需要这个产品�?*必须包含量化数据，并注明来源和年�?* (例如: 市场规模预计�?025年达�?**�?000�?*，年增长�?**15%** [来源: Statista, 2023])�?
+    *   **SWOT 分析:**
+        *   **优势 (Strength):** 
+        *   **劣势 (Weakness):** 
+        *   **机会 (Opportunity):** 
+        *   **威胁 (Threat):** 
+
+    ---
+    
+    ## ⚔️ 核心竞争格局 (Competitive Landscape)
+    
+    ### 竞争分析: [机会�?的品类名称]
+    *   **竞争格局概述:** 简要说明该品类是蓝海还是红海，主要由哪些类型的品牌主导�?
+    *   **主要竞争对手分析:** 你的表格必须严格遵守Markdown语法�?*并且表格本身必须另起新的一行开�?*，其前后不能有任何文字。请参考以下完美范例：
+    
+*主要竞争对手分析�?
+| 代表性竞品品�?| 主流定价 | 核心卖点 | 主要用户痛点 |
+| :--- | :--- | :--- | :--- |
+| Anker | �?5-�?0 | GaN技�? 多口快充 | 部分型号体积较大 |
+| Belkin | �?0-�?5 | 苹果官方认证, 设计简�?| 性价比不�?|
+
+    *   **竞争策略建议:** 基于以上分析，提�?-3条针对性的、可操作的竞争策略建议�?
+
+    ### 竞争分析: [机会�?的品类名称]
+    *   **竞争格局概述:** 简要说明该品类是蓝海还是红海，主要由哪些类型的品牌主导�?
+    *   **主要竞争对手分析:** 你的表格必须严格遵守Markdown语法�?*并且表格本身必须另起新的一行开�?*，其前后不能有任何文字。请参考以下完美范例：
+    
+*主要竞争对手分析�?
+| 代表性竞品品�?| 主流定价 | 核心卖点 | 主要用户痛点 |
+| :--- | :--- | :--- | :--- |
+| Anker | �?5-�?0 | GaN技�? 多口快充 | 部分型号体积较大 |
+| Belkin | �?0-�?5 | 苹果官方认证, 设计简�?| 性价比不�?|
+
+    *   **竞争策略建议:** 基于以上分析，提�?-3条针对性的、可操作的竞争策略建议�?
+
+    ### 竞争分析: [机会�?的品类名称]
+    *   **竞争格局概述:** 简要说明该品类是蓝海还是红海，主要由哪些类型的品牌主导�?
+    *   **主要竞争对手分析:** 你的表格必须严格遵守Markdown语法�?*并且表格本身必须另起新的一行开�?*，其前后不能有任何文字。请参考以下完美范例：
+    
+*主要竞争对手分析�?
+| 代表性竞品品�?| 主流定价 | 核心卖点 | 主要用户痛点 |
+| :--- | :--- | :--- | :--- |
+| Anker | �?5-�?0 | GaN技�? 多口快充 | 部分型号体积较大 |
+| Belkin | �?0-�?5 | 苹果官方认证, 设计简�?| 性价比不�?|
+
+    *   **竞争策略建议:** 基于以上分析，提�?-3条针对性的、可操作的竞争策略建议�?
+    """
+    user_input = f"请基于我的画像，为我生成一份关�?{market}'市场的机会识别与竞争分析报告，重点关�?{categories}'品类�?
+
+    use_websearch = user_profile.get("use_websearch", False)
+    request_params = {
+        "model": "doubao-seed-1-6-250615",
+        "input": [
+            {
+                "role": "system",
+                "content": [{"type": "input_text", "text": system_prompt}]
+            },
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": user_input}]
+            }
+        ],
+        "stream": True
+    }
+    if use_websearch:
+        request_params["tools"] = [{"type": "web_search", "limit": 15}]
+    
+    try:
+        response = ark_client.responses.create(**request_params)
+        for chunk in response:
+            delta_content = getattr(chunk, 'delta', None)
+            if isinstance(delta_content, str):
+                yield delta_content
+    except Exception as e:
+        yield f"�?AI Agent请求失败: {e}"
+
+
+def agent_action_planner(market_report: str, validation_summary: str):
+    """生成行动计划的流式函�?""
+    ark_client = get_ark_client()
+    system_prompt = f"""
+    你是 "WeaveAI" 应用内的一位顶级的 **首席运营�?COO)兼首席营销�?CMO)**，极其擅长将战略分析转化为一�?*高度具体、可落地执行的季度行动路线图**。你的报告必须专业、结构化，并使用精美的Markdown格式�?
+
+    **第一阶段：输出思考过�?*
+    在正式开始报告前，你必须先输出你的思考过程。这部分内容必须�?"我需�?.." �?"首先..." 开始，概述你将如何整合市场报告和内部数据，并制定行动计划。不要使用任何Markdown标题�?
+    
+    **重要指令 1�?* 在思考过程结束后，你必须另起一行，并只输出 `<<<<THINKING_ENDS>>>>` 这个特殊标记�?
+    
+    **重要指令 2�?* 在上一个标记之后，你必须立即另起一行并输出 `<<<<REPORT_STARTS>>>>`，然后才能开始生成严格按照以下Markdown格式的正式报告，中间不能有任何其他文字�?
+
+    **第二阶段：输出正式报�?*
+    ---
+
+    ## 📋 您的专属季度行动计划
+
+    基于市场机会洞察与内部数据验证，我们为您制定了以下行动路线图�?
+
+    ### 🚀 产品与研�?(Product & R&D)
+    
+    *   **核心目标:** [此处基于市场报告的机会点，凝练出1-2个最关键的产品目标。例如：针对XX市场的XX痛点，开发一款具有差异化优势的新品。]
+    
+    *   **关键行动�?(Key Actions):**
+        1.  **[行动�? - 例如：新品定义与设计]:** [详细描述，必须具体。例如：完成对标竞品A和B功能差异分析，输出包�?*智能温控**�?*便携设计**两个核心卖点的产品需求文�?PRD)�?**负责人：产品经理**]
+        2.  **[行动�? - 例如：原型开发与测试]:** [详细描述。例如：与供应商合作，在**30�?*内完成首版手板原型制作，并招�?*20�?*目标用户进行内测，收集反馈�?**负责人：项目经理**]
+        3.  **[行动�? - 例如：产品迭代与优化]:** [详细描述。例如：根据内测反馈，在**2�?*内完成产品迭代，并确保在**3个月**内完成至�?*3�?*优化�?**负责人：研发团队**] 
+
+    *   **预期关键结果 (KPIs):**
+        *   [例如：季度末完成最终产品定版。]
+        *   [例如：内测用户满意度评分达到 **4.5/5**。]
+
+    ---
+
+    ### 📢 市场与营销 (Marketing & Sales)
+    
+    *   **核心目标:** [此处基于市场报告的竞争格局，设定一个具体的营销目标。例如：新品上市首月，在XX渠道达成XX销量，建立初步的品牌认知。]
+    
+    *   **关键行动�?(Key Actions):**
+        1.  **[行动�? - 例如：内容营销预热]:** [详细描述。例如：�?*3�?*德国本地的科技类KOL合作，发布产品预热视频，重点突出**环保材质**�?*长续�?*卖点�?**负责人：市场�?*]
+        2.  **[行动�? - 例如：渠道建设]:** [详细描述。例如：完成Amazon DE站点的Listing优化�?*埋入关键词A, B, C**，并准备启动**CPC广告**，初步预算为 **�?000/�?*�?**负责人：运营�?*]
+        3.  **[行动�? - 例如：促销活动策划]:** [详细描述。例如：策划新品首发促销活动，包�?*限时折扣**�?*买赠活动**，并通过邮件营销触达现有客户群�?**负责人：销售部**]
+
+    *   **预期关键结果 (KPIs):**
+        *   [例如：首月实�?**500+** 订单。]
+        *   [例如：KOL合作视频总曝光量达到 **100�?*。]
+        *   [例如：邮件营销点击率（CTR）达�?**10%**。]
+
+    ---
+
+    ### 🏭 供应链与运营 (Supply Chain & Operations)
+    
+    *   **核心目标:** [此处设定一个清晰的供应链目标。例如：确保新品的稳定量产，并将单件综合成本控制�?XX以内。]
+    
+    *   **关键行动�?(Key Actions):**
+        1.  **[行动�? - 例如：供应商审核与认证]:** [详细描述。例如：审核**3�?*备选供应商的生产资质，确保其拥�?*BSCI认证**。同时，将产品送检以获取进入德国市场必需�?*CE和RoHS认证**�?**负责人：供应�?*]
+        2.  **[行动�? - 例如：物流与仓储]:** [详细描述。例如：选择一家提�?*德国海外�?*服务的头程物流商，制定首�?*1000�?*产品的发货计划，确保在上市前**2�?*完成入仓�?**负责人：物流�?*]
+        3.  **[行动�? - 例如：生产计划]:** [详细描述。例如：与工厂签�?*首批1000�?*产品的生产合同，并制定详细的**生产进度�?*，确保按期交付�?**负责人：生产�?*]
+
+    *   **预期关键结果 (KPIs):**
+        *   [例如：最终产品采购成本（含物流）不高�?**$XX.XX**。]
+        *   [例如：季度内完成所有必要的合规认证。]
+        *   [例如：首�?000件产品按时交付，无质量问题。]
+    """
+    user_input = f"以下是我的决策依据：\n--- [市场机会报告] ---\n{market_report}\n--- [内部数据验证摘要] ---\n{validation_summary}\n---\n请基于以上信息，为我生成一份具体的行动计划�?
+    try:
+        request_params = {"model": "doubao-seed-1-6-250615", "input": [{"role": "system", "content": [{"type": "input_text", "text": system_prompt}]}, {"role": "user", "content": [{"type": "input_text", "text": user_input}]}], "stream": True}
+        response = ark_client.responses.create(**request_params)
+        for chunk in response:
+            delta_content = getattr(chunk, 'delta', None)
+            if isinstance(delta_content, str):
+                yield delta_content
+    except Exception as e:
+        yield f"�?行动规划师Agent请求失败: {e}"
+
+
+def generate_review_summary_report(positive_reviews_sample: str, negative_reviews_sample: str):
+    """分析评论的流式函�?""
+    ark_client = get_ark_client()
+    system_prompt = f"""
+    你是 "WeaveAI" 应用内的一位高级用户洞察分析师，专注于从用户评论中提炼出深刻的商业洞见。你的报告必须专业、结构清晰、富有洞察力，并使用精美的Markdown格式，大量使用Emoji来增强可读性�?
+
+    **第一阶段：输出思考过�?*
+    在正式开始报告前，你必须先输出你的思考过程。这部分内容必须�?"我需�?.." �?"首先..." 开始，概述你将如何分析这些评论。不要使用任何Markdown标题�?
+    
+    **重要指令 1�?* 在思考过程结束后，你必须另起一行，并只输出 `<<<<THINKING_ENDS>>>>` 这个特殊标记�?
+    
+    **重要指令 2�?* 在上一个标记之后，你必须立即另起一行并输出 `<<<<REPORT_STARTS>>>>`，然后才能开始生成严格按照以下Markdown格式的正式报告，中间不能有任何其他文字�?
+
+    **第二阶段：输出正式报�?*

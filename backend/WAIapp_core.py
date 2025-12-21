@@ -13,6 +13,8 @@ from pandarallel import pandarallel
 # 分析库
 from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.ensemble import IsolationForest
+from sklearn.neighbors import LocalOutlierFactor
 from keras.models import Sequential
 from keras.layers import LSTM, Dense, Input
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -565,6 +567,113 @@ def perform_product_clustering(df: pd.DataFrame) -> dict:
         "scatter_3d_chart_json": fig_3d.to_json()
     }
 
+def perform_anomaly_detection(
+    df: pd.DataFrame,
+    date_col: str = "Date",
+    sku_col: str = "SKU",
+    qty_col: str = "Qty",
+    amount_col: str = "Amount",
+    contamination: float = 0.05,
+    lookback: int = 7,
+) -> dict:
+    required = {date_col, sku_col, qty_col, amount_col}
+    if missing := required.difference(df.columns):
+        raise ValueError(f"异常检测失败：缺少必要列 {', '.join(missing)}")
+
+    panel = (
+        df[[date_col, sku_col, qty_col, amount_col]]
+        .rename(columns={date_col: "date", sku_col: "sku", qty_col: "qty", amount_col: "amount"})
+        .copy()
+    )
+    panel["date"] = pd.to_datetime(panel["date"], errors="coerce")
+    panel.dropna(subset=["date", "sku"], inplace=True)
+    if panel.empty:
+        raise ValueError("异常检测失败：有效数据为空")
+
+    daily = (
+        panel.groupby(["sku", "date"])
+        .agg(total_qty=("qty", "sum"), total_amount=("amount", "sum"))
+        .reset_index()
+    )
+
+    frames = []
+    for sku, sku_df in daily.groupby("sku"):
+        idx = pd.date_range(sku_df["date"].min(), sku_df["date"].max(), freq="D")
+        filled = (
+            sku_df.set_index("date")
+            .reindex(idx, fill_value=0)
+            .reset_index()
+            .rename(columns={"index": "date"})
+        )
+        filled["sku"] = sku
+        frames.append(filled)
+    panel = pd.concat(frames, ignore_index=True).sort_values(["sku", "date"])
+
+    panel["rolling_mean"] = panel.groupby("sku")["total_qty"].transform(
+        lambda s: s.rolling(lookback, min_periods=1).mean()
+    )
+    panel["rolling_std"] = panel.groupby("sku")["total_qty"].transform(
+        lambda s: s.rolling(lookback, min_periods=1).std()
+    ).fillna(0)
+    panel["lag_1"] = panel.groupby("sku")["total_qty"].shift(1).fillna(0)
+    panel["pct_change"] = (
+        panel.groupby("sku")["total_qty"].pct_change().replace([np.inf, -np.inf], 0).fillna(0)
+    )
+    panel["residual"] = panel["total_qty"] - panel["rolling_mean"]
+
+    features = panel[["total_qty", "rolling_mean", "rolling_std", "lag_1", "pct_change", "residual"]].fillna(0)
+
+    if len(panel) < 10:
+        raise ValueError("异常检测失败：数据量不足，至少需要 10 条记录")
+
+    contamination = min(max(contamination, 0.01), 0.5)
+    if len(panel) >= 50:
+        detector = IsolationForest(contamination=contamination, random_state=42)
+        panel["anomaly_score"] = -detector.fit(features).score_samples(features)
+    else:
+        n_neighbors = max(2, min(20, len(panel) - 1))
+        detector = LocalOutlierFactor(n_neighbors=n_neighbors)
+        panel["anomaly_score"] = -detector.fit_predict(features)
+
+    threshold = np.quantile(panel["anomaly_score"], 1 - contamination)
+    panel["is_anomaly"] = panel["anomaly_score"] >= threshold
+    panel["expected_qty"] = panel["rolling_mean"].round(2)
+    panel["delta_qty"] = panel["total_qty"] - panel["expected_qty"]
+    panel["direction"] = np.where(panel["delta_qty"] >= 0, "spike", "drop")
+
+    anomalies = panel[panel["is_anomaly"]].copy()
+    sku_summary = (
+        anomalies.groupby("sku")
+        .agg(
+            flag_count=("date", "count"),
+            last_flag=("date", "max"),
+            prevalent_direction=("direction", lambda s: s.value_counts().idxmax()),
+            avg_delta=("delta_qty", "mean"),
+        )
+        .reset_index()
+        .sort_values(by="flag_count", ascending=False)
+    )
+
+    def _fmt(series):
+        return [d.strftime("%Y-%m-%d") if isinstance(d, pd.Timestamp) else d for d in series]
+
+    panel["date"] = _fmt(panel["date"])
+    anomalies["date"] = _fmt(anomalies["date"])
+    if "last_flag" in sku_summary:
+        sku_summary["last_flag"] = _fmt(sku_summary["last_flag"])
+
+    return {
+        "timeseries": panel[
+            ["date", "sku", "total_qty", "expected_qty", "delta_qty", "anomaly_score", "is_anomaly", "direction"]
+        ].to_dict("records"),
+        "sku_summary": sku_summary[
+            ["sku", "flag_count", "last_flag", "prevalent_direction", "avg_delta"]
+        ].to_dict("records"),
+        "top_flags": anomalies[
+            ["date", "sku", "total_qty", "expected_qty", "delta_qty", "direction", "anomaly_score"]
+        ].sort_values(by="anomaly_score", ascending=False).head(100).to_dict("records"),
+        "meta": {"contamination": contamination, "lookback": lookback},
+    }
 
 def perform_sentiment_analysis(df: pd.DataFrame) -> dict:
     """

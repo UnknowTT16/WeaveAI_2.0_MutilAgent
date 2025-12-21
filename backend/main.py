@@ -28,7 +28,8 @@ from WAIapp_core import (
     perform_product_clustering,
     perform_sentiment_analysis,
     generate_final_html_report,
-    perform_basket_analysis
+    perform_basket_analysis,
+    perform_anomaly_detection
 )
 
 app = FastAPI(
@@ -187,6 +188,20 @@ async def api_product_clustering(file: UploadFile = File(...)):
             "clustering_results": clustering_result,
             "basket_analysis_results": basket_analysis_result
         })
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+
+
+
+@app.post("/api/v1/data/anomaly-detection", tags=["Data Analysis"])
+async def api_anomaly_detection(file: UploadFile = File(...)):
+    try:
+        df = await process_uploaded_file(file, ['.csv', '.parquet'])
+        cleaned_df = clean_sales_data(df)
+        result = perform_anomaly_detection(cleaned_df)
+        return JSONResponse(content=result)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
