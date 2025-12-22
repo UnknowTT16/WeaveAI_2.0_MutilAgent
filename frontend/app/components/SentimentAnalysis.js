@@ -3,6 +3,7 @@
 
 import { useState, useMemo, useCallback } from 'react';
 import Slider from 'rc-slider';
+import 'rc-slider/assets/index.css';
 import DataTable from './DataTable';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
