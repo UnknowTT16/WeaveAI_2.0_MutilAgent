@@ -4,13 +4,14 @@ import io
 import pandas as pd
 import uuid
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
+from urllib.parse import urlparse, unquote
 
 # >>> 新增/调整：为 PDF 导出做准备
 import asyncio
@@ -41,6 +42,9 @@ app = FastAPI(
 REPORTS_DIR = Path("static/reports")
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/reports", StaticFiles(directory=REPORTS_DIR), name="reports")
+ALLOWED_REPORT_HOSTS = {"127.0.0.1", "localhost", "backend"}
+ALLOWED_REPORT_PATH_PREFIX = "/reports/"
+ALLOWED_REPORT_SUFFIX = ".html"
 
 origins = [
     "http://localhost:3000",
@@ -226,6 +230,26 @@ async def api_sentiment_analysis(file: UploadFile = File(...)):
 class ExportPdfRequest(BaseModel):
     report_url: str
 
+def _validate_report_url(report_url: str):
+    parsed = urlparse(report_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="report_url 仅允许 http/https")
+    if not parsed.hostname or parsed.hostname not in ALLOWED_REPORT_HOSTS:
+        raise HTTPException(status_code=403, detail="report_url host 不在白名单")
+    if parsed.username or parsed.password:
+        raise HTTPException(status_code=400, detail="report_url 不允许包含用户信息")
+    if parsed.query or parsed.fragment:
+        raise HTTPException(status_code=400, detail="report_url 不允许包含 query/fragment")
+
+    path = unquote(parsed.path or "")
+    posix_path = PurePosixPath(path)
+    if ".." in posix_path.parts:
+        raise HTTPException(status_code=400, detail="report_url 路径非法")
+    if not path.startswith(ALLOWED_REPORT_PATH_PREFIX) or not path.endswith(ALLOWED_REPORT_SUFFIX):
+        raise HTTPException(status_code=403, detail="report_url 路径不在白名单")
+
+    return parsed
+
 def _guess_local_chrome_path() -> Optional[str]:
     """
     优先读取 CHROME_PATH，其次在常见安装目录中查找 Chrome / Edge。
@@ -298,16 +322,8 @@ async def _export_url_to_pdf(report_url: str, output_path: Path):
         else:
             raise
 
-    from urllib.parse import urlparse, urlunparse
-
-    parsed = urlparse(report_url)
-    effective_url = report_url
-    if parsed.hostname and parsed.hostname not in {"127.0.0.1", "localhost", "backend"}:
-        internal_port = f":{parsed.port}" if parsed.port else ""
-        effective_url = urlunparse(parsed._replace(netloc=f"127.0.0.1{internal_port}"))
-
     page = await browser.newPage()
-    await page.goto(effective_url, {"waitUntil": "networkidle2", "timeout": 60000})
+    await page.goto(report_url, {"waitUntil": "networkidle2", "timeout": 60000})
     await page.pdf({
         "path": str(output_path),
         "format": "A4",
@@ -319,11 +335,12 @@ async def _export_url_to_pdf(report_url: str, output_path: Path):
 @app.post("/api/v1/reports/export-pdf", tags=["AI Reports"])
 async def api_export_pdf(payload: ExportPdfRequest, request: Request):
     try:
-        base_name = Path(payload.report_url).stem or f"report_{uuid.uuid4()}"
+        parsed = _validate_report_url(payload.report_url)
+        base_name = PurePosixPath(parsed.path).stem or f"report_{uuid.uuid4()}"
         pdf_filename = f"{base_name}.pdf"
         pdf_path = REPORTS_DIR / pdf_filename
 
-        await _export_url_to_pdf(payload.report_url, pdf_path)
+        await _export_url_to_pdf(parsed.geturl(), pdf_path)
 
         pdf_url = f"{request.base_url}reports/{pdf_filename}"
         return {"pdf_url": pdf_url}
