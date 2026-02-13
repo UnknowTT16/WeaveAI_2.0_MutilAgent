@@ -1,8 +1,6 @@
 # WeaveAI 智能分析助手
 
-> WeaveAI 2.0：Supervisor-Worker + 多轮辩论 的多 Agent 市场洞察系统（SSE 实时流式输出）。
-
-本仓库已移除 WeaveAI 1.0（单体 + 数据分析/PDF 导出等）相关代码与依赖，当前仅专注 WeaveAI 2.0 实现。
+WeaveAI 2.0：Supervisor-Worker + 多轮辩论 的多 Agent 市场洞察系统（SSE 实时流式输出）。
 
 ---
 
