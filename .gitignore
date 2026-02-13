@@ -1,37 +1,75 @@
-# Python / Backend
-# -----------------
-venv/
-.venv/
-__pycache__/
-*.pyc
-.env
-
-# Node.js / Frontend
-# --------------------
-/frontend/node_modules/
-/frontend/.next/
-/frontend/out/
-/frontend/.env.local
-/frontend/.env.development.local
-/frontend/.env.production.local
-
-# IDE & OS specific files
-# -----------------------
+# OS / IDE
+# --------
+.DS_Store
+Thumbs.db
 .idea/
 .vscode/
-.DS_Store
+*.swp
+*.swo
+*~
 
-# Log files
-# ---------
+# Python / Backend
+# ----------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.python-version
+.venv/
+venv/
+backend/.venv/
+backend/venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+
+# Env files / secrets
+# -------------------
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+frontend/.env*
+!frontend/.env.example
+*.pem
+*.key
+*.crt
+weaveai-key.pem
+
+# Node.js / Frontend
+# ------------------
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/coverage/
+frontend/.turbo/
+frontend/.vercel/
+*.tsbuildinfo
+
+# Logs / runtime outputs
+# ----------------------
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
+artifacts/
+logs/
+tmp/
 
-# Security keys
-weaveai-key.pem
-*.pem
-
-#new additions
-backend/static/reports/
-node20-alpine.tar
-python311-slim.tarnul
+# Local tooling
+# -------------
+.claude/

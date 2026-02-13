@@ -1,4 +1,4 @@
-后端启动： uvicorn main:app --reload
+后端启动： uvicorn main:app --reload --port 8000
 前端启动：npm run dev
 
 git add .

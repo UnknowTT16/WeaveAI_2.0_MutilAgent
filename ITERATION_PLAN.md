@@ -1,9 +1,9 @@
 # WeaveAI 2.0 重构与升级迭代计划
 
-> **版本**: 2.1  
+> **版本**: 2.6  
 > **创建日期**: 2026-02-07  
-> **最后更新**: 2026-02-07  
-> **目标**: 多 Agent 协作工作流升级（市场洞察 + 多轮辩论 + 评论分析）
+> **最后更新**: 2026-02-13  
+> **目标**: 多 Agent 协作工作流升级（Market Insight v2：并行收集 + 多轮辩论 + 综合报告 + SSE 流式 + 最小落库闭环）
 
 ---
 
@@ -25,18 +25,26 @@
 ### 1.1 当前架构概览
 
 ```
-当前架构：单体式 Agent + 线性工作流
+当前架构：WeaveAI 2.0（多 Agent + 多轮辩论 + SSE）
 ┌──────────────────────────────────────────────────────────────┐
 │  前端 (Next.js 15 + React 19)                                │
-│  └─ 三步式工作流：Insight → Validation → Action             │
+│  └─ 单工作流：Profile → SSE 实时进度 → 综合报告展示           │
 └────────────────────────┬─────────────────────────────────────┘
-                         │ REST API (流式/JSON)
+                         │ SSE / JSON
 ┌────────────────────────▼─────────────────────────────────────┐
-│  后端 (FastAPI)                                              │
-│  ├─ AI Agent 1: 市场洞察分析师 (generate_full_report_stream) │
-│  ├─ AI Agent 2: 行动规划师 (agent_action_planner)            │
-│  ├─ AI Agent 3: 评论分析师 (generate_review_summary_report)  │  ← 保留
-│  └─ 数据处理模块 (LSTM/KMeans/Anomaly/Sentiment) ← 删除      │
+│  后端 (FastAPI + LangGraph)                                  │
+│  ├─ v2 API: /api/v2/market-insight/{stream|generate|status}   │
+│  ├─ Orchestrator(GraphEngine): fan-out -> debate -> synth     │
+│  ├─ Worker Agents(4): trend / competitor / regulation / social│
+│  ├─ Debate: peer_review + red_team (可配轮数与 followup)       │
+│  └─ Synthesizer: 汇总最终报告                                 │
+└──────────────────────────────────────────────────────────────┘
+                         │ 最小落库（Phase 1）
+┌────────────────────────▼─────────────────────────────────────┐
+│  本地 Supabase/Postgres（docker-compose）                     │
+│  ├─ sessions / agent_results / debate_exchanges / workflow_events
+│  ├─ tool_invocations（Phase 1 建表，Phase 4 完整审计）         │
+│  └─ 写入方式：psycopg2 直连 + fire-and-forget 队列             │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -48,7 +56,9 @@
 | UI 库 | React | 19.1.0 |
 | 样式 | Tailwind CSS | 3.4.18 |
 | 后端框架 | FastAPI | latest |
-| AI/LLM | 火山引擎 Ark (doubao-seed-1-6-250615) | - |
+| 编排引擎 | LangGraph | 1.0.x |
+| AI/LLM | 火山引擎 Ark Responses API | - |
+| 数据库 | 本地 Supabase/Postgres（docker-compose） | - |
 | ~~机器学习~~ | ~~TensorFlow/Keras, scikit-learn~~ | ❌ 删除 |
 
 ### 1.3 现有 Agent 架构问题诊断
@@ -68,7 +78,6 @@
 
 | 文件/模块 | 问题 | 处理方式 |
 |----------|------|---------|
-| `backend/WAIapp_core.py` | 986 行单文件，职责过重 | 拆分重构 |
 | `frontend/app/page.js` | 15+ useState，状态分散 | Context + Reducer |
 | 流式处理 | 手动解析标记符，缺乏统一协议 | 统一 SSE 协议 |
 | 错误处理 | Agent 失败后无重试/降级机制 | 编排层处理 |
@@ -78,10 +87,10 @@
 ### 1.5 范围调整说明
 
 > **重要变更**：经评估，原 Data Validation Swarm（销售预测、商品聚类、异常检测、情感分析）不符合实际使用场景，**已从迭代范围中删除**。
-> 
-> **保留功能**：评论分析师 Agent（`generate_review_summary_report`）作为**独立功能**保留，用户可上传评论数据获取分析报告。
-> 
-> 重点转向：**市场洞察多 Agent 协作 + 多轮辩论机制 + 社交舆情数据源**。
+>
+> **当前范围**：仓库专注 WeaveAI 2.0（Market Insight v2）实现，不再保留 v1 兼容代码。
+>
+> **Phase 1 重点**：模块化后端结构、BaseAgent、v2 SSE 事件协议、IGraphEngine 接口、以及“最小落库闭环”（sessions/agent_results/debate_exchanges/workflow_events）。
 
 ---
 
@@ -147,17 +156,257 @@
 
 | Agent 名称 | 职责 | 工具集 | 输入 | 输出 |
 |-----------|------|-------|-----|------|
-| **Orchestrator** | 任务分解、路由、辩论协调、聚合、错误恢复 | `dispatch`, `aggregate`, `retry` | 用户请求 | 最终报告 |
-| **TrendScout** | 市场趋势研究 | `web_search`, `reddit_api` | 市场定义 | 趋势数据 |
-| **CompetitorAnalyst** | 竞品分析 | `web_search`, `reddit_api` | 品类定义 | 竞品矩阵 |
-| **RegulationChecker** | 法规合规检查 | `web_search` | 目标市场 | 合规清单 |
-| **SocialSentinel** | 社交舆情采集与分析 | `reddit_api`, `web_search` | 关键词 | 舆情报告 |
-| **DebateCoordinator** | 多轮辩论协调 | 内部调度 | Agent 结论 | 共识报告 |
-| **ReviewAnalyst** | 评论数据分析（独立功能）[保留] | `review_parser`, `sentiment_llm` | 评论数据 | 评论分析报告 |
-| **StrategicPlanner** | 行动规划 | `plan_template`, `kpi_generator` | 洞察结果 | 行动计划 |
-| **RiskEvaluator** | 风险评估 | `risk_matrix`, `mitigation_suggest` | 所有数据 | 风险报告 |
+| **Orchestrator** | 任务分解、路由、辩论协调、聚合、错误恢复 | LangGraph 编排 | 用户画像 + 配置 | 最终报告 |
+| **TrendScout** | 市场趋势研究 | Ark `web_search`（可选） | 目标市场/品类 | 趋势洞察 |
+| **CompetitorAnalyst** | 竞品分析 | Ark `web_search`（可选） | 目标市场/品类 | 竞品矩阵 |
+| **RegulationChecker** | 法规合规检查 | Ark `web_search`（可选） | 目标市场/品类 | 合规清单 |
+| **SocialSentinel** | 舆情与用户声音采集 | Ark `web_search`（可选） | 目标市场/品类 | 舆情摘要 |
+| **DebateChallenger** | 红队质疑（批判审查） | 内部调度 | 其他 Agent 输出 | 质疑点 |
+| **Synthesizer** | 综合分析与最终报告生成 | 内部调度 | 全部结果 + 辩论记录 | 综合报告 |
 
-### 2.3 多轮辩论（Debate）机制设计
+
+### 2.3 Agent-Model 映射配置
+
+> **设计原则**：根据每个 Agent 的职责特性，选择最适合的模型。
+
+| Agent 名称 | 模型 ID | 选择理由 |
+|-----------|---------|----------|
+| **TrendScout** (趋势侦察员) | `doubao-seed-1-8-251228` | 256k 上下文 + 强联网搜索 + 发散联想能力强 |
+| **CompetitorAnalyst** (竞争分析师) | `deepseek-v3-2-251201` | 逻辑推理强 + 结构化分析能力优秀 |
+| **RegulationChecker** (法规检查员) | `kimi-k2-thinking-251104` | 长文档阅读 + Thinking 模式深度推理 |
+| **SocialSentinel** (社媒哨兵) | `doubao-seed-1-8-251228` | 中文语感佳 + 情感理解能力强 |
+| **Synthesizer** (综合分析师) | `kimi-k2-thinking-251104` | 超长上下文 + 不丢细节 + 深度整合 |
+| **DebateChallenger** (辩论质疑方) | `deepseek-v3-2-251201` | 批判性思维 + 逻辑反驳能力强 |
+
+### 2.4 Agent 角色详细设定
+
+#### 2.4.1 TrendScout (趋势侦察员)
+
+```
+你是【趋势侦察员】，专注于发现市场新兴趋势和机会窗口。
+
+【核心职责】
+- 识别新兴趋势：技术变革、消费升级、政策风向
+- 评估趋势成熟度：萌芽期 / 成长期 / 成熟期 / 衰退期
+- 发现蓝海机会：未被充分开发的细分市场
+- 预警颠覆性变化：可能改变行业格局的信号
+
+【分析维度】
+- 技术趋势：新技术应用、专利动态、研发投入
+- 消费趋势：用户行为变化、需求升级、偏好迁移
+- 政策趋势：监管方向、扶持政策、贸易环境
+- 竞争趋势：行业整合、新进入者、商业模式创新
+
+【输出要求】
+- 每个趋势标注：可信度(高/中/低) + 时间窗口(短期/中期/长期) + 数据来源
+- 区分已验证趋势 vs 早期信号
+- 提供可操作的机会建议
+```
+
+#### 2.4.2 CompetitorAnalyst (竞争分析师)
+
+```
+你是【竞争分析师】，专注于竞争格局分析和竞品研究。
+
+【核心职责】
+- 绘制竞争格局：识别主要玩家、市场份额、竞争态势
+- 剖析竞品策略：定价、渠道、营销、产品差异化
+- 识别差异化机会：竞品未覆盖的需求点
+- 评估进入壁垒：技术壁垒、资金壁垒、品牌壁垒
+
+【分析框架】
+- 竞品矩阵：功能对比、价格区间、目标客群
+- SWOT 分析：每个主要竞品的优劣势机会威胁
+- 竞争策略识别：成本领先 / 差异化 / 聚焦
+- 动态跟踪：最近 6 个月的重大动作
+
+【输出要求】
+- 结构化的竞品对比表
+- 每个结论标注数据来源和时效性
+- 给出避开强敌和弯道超车的具体建议
+```
+
+#### 2.4.3 RegulationChecker (法规检查员)
+
+```
+你是【法规检查员】，专注于合规风险审查和政策解读。
+
+【核心职责】
+- 识别法规要求：适用的法律法规、标准规范
+- 评估合规成本：认证费用、时间成本、改造成本
+- 预警政策变化：即将生效的新规、正在讨论的草案
+- 提供合规路径：分步骤的合规实施建议
+
+【审查范围】
+- 行业准入：资质要求、许可证、备案登记
+- 产品合规：安全认证、环保要求、标签规范
+- 跨境合规：海关政策、关税税率、进出口限制
+- 数据合规：数据保护、隐私政策、跨境传输
+
+【输出要求】
+- 引用具体法规条款和文号
+- 区分强制性要求 vs 建议性指南
+- 评估违规后果（罚款金额、业务影响）
+- 按紧迫程度排序合规事项
+```
+
+#### 2.4.4 SocialSentinel (社媒哨兵)
+
+```
+你是【社媒哨兵】，专注于舆情监测和消费者洞察。
+
+【核心职责】
+- 捕捉舆论热点：当前讨论热度最高的话题
+- 分析口碑评价：正面/中性/负面情感分布
+- 识别 KOL 分布：影响力人物和意见领袖
+- 预警舆论风险：潜在的负面事件和公关危机
+
+【监测维度】
+- 舆情热度：讨论量、互动量、传播速度
+- 消费者痛点：高频抱怨、未满足需求
+- 口碑分析：产品评价、品牌认知、购买意愿
+- 传播生态：主要讨论平台、传播路径
+
+【输出要求】
+- 标注信息来源和采集时间
+- 区分正面 / 中性 / 负面评价
+- 识别真实用户声音 vs 可能的水军/营销内容
+- 提供舆情应对建议
+```
+
+#### 2.4.5 Synthesizer (综合分析师)
+
+```
+你是【综合分析师】，负责整合多位专家的分析并形成最终报告。
+
+【核心职责】
+- 整合四个维度：趋势、竞争、法规、舆情
+- 识别关联和矛盾：不同分析之间的逻辑关系
+- 形成一致性建议：综合各方观点的行动方案
+- 标注共识与分歧：明确哪些结论已达成共识、哪些仍有争议
+
+【报告结构】
+1. 执行摘要：3-5 个核心结论 + 总体建议
+2. 机会分析：按优先级排序的市场机会
+3. 风险提示：需要关注的潜在风险
+4. 行动建议：短期 / 中期 / 长期行动清单
+5. 附录：数据来源汇总 + 分歧点说明
+
+【输出要求】
+- 每个结论标注来源 Agent
+- 矛盾观点并列呈现，不强行统一
+- 给出置信度评估（高/中/低）
+- 语言简洁、结论可操作
+```
+
+#### 2.4.6 DebateChallenger (红队审查官)
+
+```
+你是【红队审查官】，职责是对分析报告进行批判性审查。
+
+【质疑维度】
+- 数据可靠性：数据来源是否权威？时效性如何？样本是否足够？
+- 逻辑严密性：推理过程是否有跳跃？因果关系是否成立？
+- 覆盖完整性：是否遗漏了重要视角？是否考虑了边缘情况？
+- 偏见检测：是否存在确认偏误？是否过度乐观/悲观？
+
+【质疑模式】
+- 针对具体观点提出反例或替代解释
+- 要求补充缺失的数据或论证
+- 指出隐含假设和潜在风险
+- 建议进一步验证的方向
+
+【输出格式】
+每条质疑包含：
+1. 针对的具体观点（引用原文）
+2. 质疑理由（为什么认为有问题）
+3. 建议补充（需要什么信息来验证）
+```
+
+### 2.5 多轮辩论（Debate）机制设计
+
+> **核心设计**：2 轮辩论 + 二次回应机制，总计约 29 次 API 调用
+
+#### 2.5.1 辩论流程概览
+
+```
+Phase 1: 并行收集 (4 次调用)
+  ├─ TrendScout 独立分析
+  ├─ CompetitorAnalyst 独立分析
+  ├─ RegulationChecker 独立分析
+  └─ SocialSentinel 独立分析
+              │
+              ▼
+Round 1: 同行评审 (12 次调用，含二次回应)
+  ┌─ 配对 A: TrendScout ↔ CompetitorAnalyst
+  │   ├─ TS 质疑 CA → CA 回应 → TS 确认/追问
+  │   └─ CA 质疑 TS → TS 回应 → CA 确认/追问
+  │
+  └─ 配对 B: RegulationChecker ↔ SocialSentinel
+      ├─ RC 质疑 SS → SS 回应 → RC 确认/追问
+      └─ SS 质疑 RC → RC 回应 → SS 确认/追问
+              │
+              ▼
+Round 2: 红队审查 (12 次调用，含二次回应)
+  DeepSeek 红队逐一审查 4 个 Agent:
+  ├─ 质疑 TrendScout → TS 回应 → 红队确认/追问
+  ├─ 质疑 CompetitorAnalyst → CA 回应 → 红队确认/追问
+  ├─ 质疑 RegulationChecker → RC 回应 → 红队确认/追问
+  └─ 质疑 SocialSentinel → SS 回应 → 红队确认/追问
+              │
+              ▼
+Phase 3: 综合报告 (1 次调用)
+  └─ Synthesizer 整合所有内容生成最终报告
+
+总计: 约 29 次 API 调用
+```
+
+#### 2.5.2 辩论配对规则
+
+| 辩论轮次 | 配对关系 | 质疑方向 | 设计理由 |
+|---------|---------|---------|---------|
+| Round 1 | TS ↔ CA | 趋势 vs 竞争 | 宏观趋势与微观竞争的互补验证 |
+| Round 1 | RC ↔ SS | 法规 vs 舆情 | 政策影响与市场反馈的交叉检验 |
+| Round 2 | 红队 → 全部 | 独立审查 | 批判性思维发现盲点 |
+
+#### 2.5.3 二次回应机制
+
+每轮辩论包含三步交互：
+
+```
+Step 1: 质疑方提出质疑
+  └─ "你说市场增长15%，但竞品X在收缩，如何解释？"
+
+Step 2: 被质疑方回应
+  └─ "竞品X收缩是供应链问题，整体市场数据来源于..."
+  └─ 可选：修正原有结论 (revised: true)
+
+Step 3: 质疑方确认/追问
+  └─ 确认："接受解释，保留原结论"
+  └─ 追问："供应链问题是否会扩散到整个行业？"
+```
+
+#### 2.5.4 辩论状态机
+
+```
+           ┌─────────────────────────────────────────┐
+           │                                         │
+           ▼                                         │
+    ┌─────────────┐     ┌─────────────┐     ┌───────┴─────┐
+    │  CHALLENGE  │────▶│   RESPOND   │────▶│   CONFIRM   │
+    │  (质疑)     │     │   (回应)    │     │  (确认/追问) │
+    └─────────────┘     └─────────────┘     └─────────────┘
+           │                                         │
+           │         ┌─────────────┐                 │
+           └────────▶│  ESCALATE   │◀────────────────┘
+                     │  (升级)     │   若连续追问超过2次
+                     └─────────────┘
+                           │
+                           ▼
+                     交由 Synthesizer 裁决
+```
+
+#### 2.5.5 原始示意图（保留参考）
 
 ```
 ═══════════════════════════════════════════════════════════════════════
@@ -202,7 +451,7 @@
    └─ 数据溯源（每个结论的来源 Agent 与工具）
 ```
 
-### 2.4 市场洞察分析师拆分设计
+### 2.6 市场洞察分析师拆分设计
 
 ```
 原 Agent: generate_full_report_stream (单体)
@@ -264,9 +513,102 @@
 - 当前项目的市场洞察链路依赖 Responses API 的工具调用能力（`web_search`），因此需要选择“联网搜索工具”支持列表中的模型。
 - 兼容 `web_search` 的 model_id（以官方模型列表的“联网搜索工具”章节为准）：`doubao-seed-1-8-251228`、`doubao-seed-1-6-250615`、`deepseek-v3-2-251201`、`deepseek-v3-1-terminus`、`deepseek-v3-1-250821`、`kimi-k2-thinking-251104`、`kimi-k2-250905`。
 - 推荐策略：主力优先选择 `doubao-seed-1-8-251228`；兼容保底使用 `doubao-seed-1-6-250615`（当前项目默认）；DeepSeek/Kimi 作为备选需额外关注其 RPM/TPM 配额与整体吞吐。
-- 若选择不在该支持列表中的模型：需关闭 `use_websearch` 或改为“外部搜索 → 再喂给模型”的工具链，否则会出现工具不可用或调用失败。
+- 若选择不在该支持列表中的模型：需关闭 `use_websearch` 或改为"外部搜索 → 再喂给模型"的工具链，否则会出现工具不可用或调用失败。
 
-### 3.3 编排内核工程约束
+### 3.3 火山引擎 Ark API 调用规范
+
+> 所有 Agent 通过 **Responses API** 统一调用模型
+
+#### 3.3.1 基本调用格式
+
+```python
+from volcenginesdkark import Ark
+
+client = Ark(api_key=settings.ark_api_key)
+
+response = client.responses.create(
+    model="<model_id>",  # 例如 doubao-seed-1-8-251228
+    input=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "你的提示词..."}
+            ]
+        }
+    ],
+    tools=[
+        {"type": "web_search", "limit": 15}  # 可选：联网搜索
+    ],
+    stream=True,
+    extra_body={
+        "thinking": {"type": "auto"}  # Thinking 模式控制
+    }
+)
+```
+
+#### 3.3.2 Thinking 模式配置
+
+| 配置值 | 说明 | 适用场景 |
+|-------|------|---------|
+| `{"type": "auto"}` | 模型自动判断是否需要深度思考 | 默认推荐 |
+| `{"type": "enabled"}` | 强制启用 Thinking 模式 | 复杂推理任务 (RegulationChecker, Synthesizer) |
+| `{"type": "disabled"}` | 禁用 Thinking 模式 | 简单快速响应场景 |
+
+#### 3.3.3 流式响应 Chunk 类型
+
+| chunk.type | 说明 | 处理方式 |
+|-----------|------|---------|
+| `response.reasoning_summary_text.delta` | 思考过程 (Thinking 输出) | 转发为 `agent_thinking` SSE 事件 |
+| `response.output_text.delta` | 最终输出内容 | 转发为 `agent_output` SSE 事件 |
+| `response.web_search_call.in_progress` | 搜索开始 | 转发为 `tool_start` SSE 事件 |
+| `response.web_search_call.completed` | 搜索完成 | 转发为 `tool_end` SSE 事件 |
+| `response.completed` | 响应完成 | 转发为 `agent_end` SSE 事件 |
+
+#### 3.3.4 Agent 专属配置示例
+
+```python
+# Agent-Model 映射配置 (对应 backend/core/config.py)
+AGENT_MODEL_CONFIG = {
+    "trend_scout": {
+        "model": "doubao-seed-1-8-251228",
+        "use_websearch": True,
+        "thinking_mode": "auto",
+    },
+    "competitor_analyst": {
+        "model": "deepseek-v3-2-251201",
+        "use_websearch": True,
+        "thinking_mode": "auto",
+    },
+    "regulation_checker": {
+        "model": "kimi-k2-thinking-251104",
+        "use_websearch": True,
+        "thinking_mode": "enabled",  # 强制启用深度推理
+    },
+    "social_sentinel": {
+        "model": "doubao-seed-1-8-251228",
+        "use_websearch": True,
+        "thinking_mode": "auto",
+    },
+    "synthesizer": {
+        "model": "kimi-k2-thinking-251104",
+        "use_websearch": False,  # 综合阶段不需要搜索
+        "thinking_mode": "enabled",
+    },
+    "debate_challenger": {
+        "model": "deepseek-v3-2-251201",
+        "use_websearch": False,  # 辩论阶段不需要搜索
+        "thinking_mode": "auto",
+    },
+}
+
+# 辩论配对配置
+DEBATE_PAIRS = [
+    ("trend_scout", "competitor_analyst"),      # 趋势 vs 竞争
+    ("regulation_checker", "social_sentinel"),  # 法规 vs 舆情
+]
+```
+
+### 3.4 编排内核工程约束
 
 > 多 Agent 协作的难点在"工作流编排"，不是"写很多 Agent"。以下约束在 Phase 1/2 必须满足：
 
@@ -277,67 +619,40 @@
 - **失败策略**：节点级重试（退避）、降级（skip/partial）、熔断（circuit breaker）。
 - **结果契约化**：Agent/Tool/Orchestrator 的产出用可解析 schema（JSONB + Pydantic）。
 
-### 3.4 后端新目录结构
+### 3.5 后端新目录结构
 
 ```
 backend/
-├── main.py                      # FastAPI 入口（精简）
+├── main.py                         # FastAPI 入口（仅 v2）
+├── requirements.txt                # WeaveAI 2.0 依赖（含 psycopg2-binary）
 ├── core/
-│   ├── __init__.py
-│   ├── config.py               # Pydantic Settings
-│   ├── supabase.py             # Supabase 客户端
-│   ├── exceptions.py           # 自定义异常
-│   └── dependencies.py         # 依赖注入
+│   ├── config.py                   # Settings + Agent-Model 映射
+│   ├── ark_client.py               # Ark Responses API 封装（SSE/Thinking/WebSearch）
+│   ├── graph_engine.py             # LangGraph Orchestrator + IGraphEngine
+│   └── exceptions.py               # 自定义异常
 ├── agents/
-│   ├── __init__.py
-│   ├── base.py                 # BaseAgent 抽象类
-│   ├── orchestrator.py         # OrchestratorAgent
-│   ├── market/
-│   │   ├── __init__.py
-│   │   ├── insight_orchestrator.py  # 市场洞察编排器
-│   │   ├── trend_scout.py           # 趋势研究员
-│   │   ├── competitor.py            # 竞品分析师
-│   │   ├── regulation.py            # 法规检查员
-│   │   ├── social_sentinel.py       # 社交舆情员 [新增]
-│   │   └── debate_coordinator.py    # 辩论协调器 [新增]
-│   ├── review/
-│   │   ├── __init__.py
-│   │   └── review_analyst.py        # 评论分析师 [保留独立功能]
-│   └── strategy/
-│       ├── __init__.py
-│       ├── planner.py               # 行动规划
-│       └── risk_eval.py             # 风险评估
-├── tools/
-│   ├── __init__.py
-│   ├── registry.py             # 工具注册表 + 限流器
-│   ├── web_search.py           # 网络搜索（火山引擎）
-│   ├── reddit_api.py           # Reddit 采集 [新增]
-│   ├── social_sentiment.py     # 社交舆情聚合 [新增]
-│   └── report_generator.py     # 报告生成
-├── memory/
-│   ├── __init__.py
-│   ├── entity_store.py         # 实体图存储
-│   ├── session_state.py        # 会话状态
-│   └── temporal_facts.py       # 时效性事实
+│   ├── base.py                     # BaseAgent / AgentContext
+│   ├── factory.py                  # Agent 工厂
+│   ├── market/                     # 4 个 Worker + Synthesizer
+│   └── debate/                     # Challenger（红队）
 ├── routers/
 │   ├── __init__.py
 │   └── v2/
 │       ├── __init__.py
-│       ├── sessions.py         # 会话管理
-│       ├── insights.py         # 洞察分析
-│       ├── actions.py          # 行动计划
-│       └── reports.py          # 报告导出
+│       └── market_insight.py       # /stream /generate /status /health
 ├── schemas/
-│   ├── __init__.py
 │   └── v2/
-│       ├── __init__.py
-│       ├── requests.py         # 请求模型
-│       ├── responses.py        # 响应模型
-│       └── agents.py           # Agent 相关模型
-└── utils/
-    ├── __init__.py
-    ├── markdown.py             # Markdown 处理
-    └── pdf_export.py           # PDF 导出
+│       ├── requests.py             # MarketInsightRequest / UserProfile
+│       ├── responses.py            # MarketInsightResponse / WorkflowStatus
+│       └── events.py               # SSE 事件协议（枚举 + 基础结构）
+└── database/
+    ├── pg_client.py                # Phase 1: Postgres 直连（psycopg2）
+    ├── event_sink.py               # Phase 1: SSE 事件落库汇聚器（异步队列）
+    ├── client.py                   # （可选）supabase-py 客户端封装（后续阶段可用）
+    └── migrations/
+        ├── 001_initial_schema.sql
+        ├── 002_align_v2_schema.sql
+        └── 003_update_views_and_functions.sql
 ```
 
 ---
@@ -350,11 +665,11 @@ backend/
 
 | 任务 ID | 任务描述 | 优先级 | 预计工时 |
 |--------|---------|-------|---------| 
-| P1-1 | 后端模块化拆分（WAIapp_core.py → agents/tools/memory 模块）| 高 | 3 天 |
+| P1-1 | 后端模块化拆分（core/agents/routers/schemas 结构固化）| 高 | 3 天 |
 | P1-2 | BaseAgent 抽象类设计与实现 | 高 | 2 天 |
 | P1-3 | 前端 Context + Reducer 状态管理重构（删除 validation 相关状态）| 高 | 2 天 |
-| P1-4 | 配置 Supabase 项目并创建数据模型 | 高 | 1 天 |
-| P1-5 | 实现 Supabase 客户端封装 | 高 | 1 天 |
+| P1-4 | 本地 Supabase/Postgres（docker-compose）数据模型 + migrations（001-003）| 高 | 1 天 |
+| P1-5 | Phase 1 数据库客户端封装（psycopg2 直连 + 查询接口）| 高 | 1 天 |
 | P1-6 | 定义 IGraphEngine 接口 + 事件协议 + 表结构 + 最小写入（不含成本统计/重放工具链）| 高 | 1.5 天 |
 
 > **P1-6 范围控制说明**：
@@ -368,6 +683,17 @@ backend/
 - Supabase 项目及数据表
 - IGraphEngine 接口定义
 - v2 流式协议（含辩论事件）
+
+#### Phase 1 当前进度（2026-02-10）
+
+- ✅ P1-1：后端模块化拆分已完成（仅保留 v2 代码路径）
+- ✅ P1-2：BaseAgent 已完成（`backend/agents/base.py`）
+- ✅ P1-3：前端 Context + Reducer 已完成，且已移除 validation/action 等旧模块
+- ✅ P1-4：本地 Supabase/Postgres 已落地并完成增量迁移（`backend/database/migrations/002_align_v2_schema.sql`、`backend/database/migrations/003_update_views_and_functions.sql`）
+- ✅ P1-5：Phase 1 采用 Postgres 直连（`backend/database/pg_client.py`）
+- ✅ P1-6：最小写入闭环已完成：SSE 关键事件通过 fire-and-forget 队列落库（`backend/database/event_sink.py`）
+
+验收复现见：`PHASE1_ACCEPTANCE.md`（包含迁移执行命令、SSE 触发命令、SQL 校验）。
 
 ### Phase 2: 多 Agent 协作框架 (2.5 周)
 
@@ -383,6 +709,13 @@ backend/
 | P2-6 | 实现 SocialSentinel Agent（社交舆情员）[新增] | 高 | 2 天 |
 | P2-7 | 实现 DebateCoordinator（辩论协调器）[新增] | 高 | 2 天 |
 | P2-8 | Agent 间通信协议设计与实现（含辩论语义）| 中 | 1 天 |
+| P2-9 | Orchestrator 重试耗尽降级策略（skip/partial/fail）+ `retry` 事件可追踪化 | 高 | 1 天 |
+| P2-10 | SSE 契约一致性与断连恢复（含反向代理缓冲兼容） | 中 | 1 天 |
+
+> **Phase 2 范围调整（2026-02-11）**：
+> - `SocialSentinel` 的 **Reddit API 直连**不再作为 Phase 2 阻塞验收项。
+> - Reddit 数据源能力统一后置到 **Phase 4（P4-3 / P4-4）** 实现。
+> - Phase 2 仅要求 `SocialSentinel` 在 `enable_websearch` 场景下稳定产出社媒洞察。
 
 **交付物**:
 - Orchestrator Agent（基于 LangGraph）
@@ -390,6 +723,15 @@ backend/
 - Agent 通信协议文档
 - 多轮辩论流程实现
 - 最小可回放执行链路
+
+#### Phase 2 收口测试记录（2026-02-13）
+
+- ✅ 路由测试通过：`debate_rounds=0/1/2` 分别验证了「直达综合」「仅 Round 1」「Round 1+2」路径，且均可观测到对应生命周期事件。
+- ✅ 断连恢复通过：使用固定 `session_id` 中途断开 SSE 后，`/api/v2/market-insight/status/{session_id}` 能返回 `session/agent_results/workflow_events`。
+- ✅ 落库链路验证通过：`sessions` 与 `workflow_events` 可查询到 `orchestrator_start`、`agent_start` 等关键事件。
+- ⚠️ 运行注意事项：`session_id` 必须使用纯 UUID（不可加 `acc-` 前缀），否则会触发 `invalid input syntax for type uuid` 并导致落库失败。
+- ⚠️ 外部依赖波动：辩论阶段偶发 Ark 流式连接中断（`incomplete chunked read` / `Connection error`），当前由重试与降级策略兜底，不阻塞主流程验收。
+- 📎 验收记录参考：`PHASE2_ACCEPTANCE.md`。
 
 ### Phase 3: 共享记忆系统 (1.5 周)
 
@@ -449,247 +791,24 @@ backend/
 
 ## 五、数据模型设计
 
-### 5.1 Supabase 数据表
+### 5.1 数据表（当前实现，Phase 1）
 
-```sql
--- ============================================
--- 用户档案表
--- ============================================
-CREATE TABLE profiles (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID REFERENCES auth.users,
-  target_market TEXT NOT NULL,
-  supply_chain TEXT NOT NULL,
-  seller_type TEXT NOT NULL,
-  min_price INT,
-  max_price INT,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
+Phase 1 的数据库 schema 以迁移文件为准：
 
--- ============================================
--- 会话表
--- ============================================
-CREATE TABLE sessions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  profile_id UUID REFERENCES profiles,
-  status TEXT DEFAULT 'active', -- active, completed, archived
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  metadata JSONB DEFAULT '{}'
-);
+- `backend/database/migrations/001_initial_schema.sql`
+- `backend/database/migrations/002_align_v2_schema.sql`
+- `backend/database/migrations/003_update_views_and_functions.sql`
 
--- ============================================
--- Agent 执行记录表
--- ============================================
-CREATE TABLE agent_executions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id UUID REFERENCES sessions,
-  agent_name TEXT NOT NULL,
-  status TEXT DEFAULT 'pending', -- pending, running, completed, failed
-  thinking TEXT,
-  output TEXT,
-  artifacts JSONB DEFAULT '{}',
-  started_at TIMESTAMPTZ,
-  completed_at TIMESTAMPTZ,
-  error_message TEXT
-);
+当前实现已使用/写入的核心表（public schema）：
 
--- ============================================
--- 工具调用流水表（审计 / 成本 / 回放 / 失败定位）
--- ============================================
-CREATE TABLE tool_invocations (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id UUID REFERENCES sessions,
-  execution_id UUID REFERENCES agent_executions,
-  tool_name TEXT NOT NULL,
-  status TEXT DEFAULT 'pending', -- pending, running, completed, failed
-  input JSONB DEFAULT '{}',      -- 已脱敏
-  output JSONB DEFAULT '{}',     -- 已脱敏
-  started_at TIMESTAMPTZ,
-  completed_at TIMESTAMPTZ,
-  error_message TEXT,
-  cost JSONB DEFAULT '{}',       -- tokens / 费用 / 资源用量
-  idempotency_key TEXT           -- session_id + node_id + tool_name + 序号
-);
+- `sessions`：会话与工作流状态（包含 `profile jsonb` + v2 画像列 + status/phase/timestamps）
+- `agent_results`：每个 Agent 一行（`unique(session_id, agent_name)`），保存 content/thinking/sources/duration/status/error
+- `debate_exchanges`：辩论交换（含 `round_number/debate_type/followup_content/revised`）
+- `workflow_events`：关键生命周期事件流水（Phase 1 不写 chunk 事件，避免高频写入）
+- `feedback`：用户反馈（预留）
+- `tool_invocations`：Phase 1 已建表；Phase 4 扩展审计/脱敏/成本统计与 ToolRegistry 联动
 
--- ============================================
--- 辩论记录表 [新增]
--- ============================================
-CREATE TABLE debate_rounds (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id UUID REFERENCES sessions,
-  round_number INT NOT NULL,
-  round_type TEXT NOT NULL,      -- independent, challenge, respond, consensus
-  participants JSONB DEFAULT '[]',
-  challenges JSONB DEFAULT '[]', -- [{from, to, content}]
-  responses JSONB DEFAULT '[]',  -- [{agent, content, revised}]
-  consensus JSONB DEFAULT '{}',  -- {summary, dissent_points, confidence}
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- ============================================
--- 实体表（知识图谱）
--- ============================================
-CREATE TABLE entities (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id UUID REFERENCES sessions,
-  entity_type TEXT NOT NULL,     -- market, competitor, product, trend, sentiment
-  name TEXT NOT NULL,
-  properties JSONB DEFAULT '{}',
-  source_agent TEXT,             -- 来源 Agent
-  confidence FLOAT DEFAULT 1.0,  -- 置信度
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- ============================================
--- 实体关系表
--- ============================================
-CREATE TABLE entity_relations (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  source_id UUID REFERENCES entities,
-  target_id UUID REFERENCES entities,
-  relation_type TEXT NOT NULL,   -- competes_with, targets, influences, contradicts
-  properties JSONB DEFAULT '{}',
-  valid_from TIMESTAMPTZ DEFAULT NOW(),
-  valid_until TIMESTAMPTZ
-);
-
--- ============================================
--- Row Level Security
--- ============================================
-ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE agent_executions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE tool_invocations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE debate_rounds ENABLE ROW LEVEL SECURITY;
-ALTER TABLE entities ENABLE ROW LEVEL SECURITY;
-ALTER TABLE entity_relations ENABLE ROW LEVEL SECURITY;
-
--- ============================================
--- RLS 策略（完整版）
--- ============================================
-
--- profiles 表策略
-CREATE POLICY "Users can view own profiles"
-  ON profiles FOR SELECT
-  USING (auth.uid() = user_id);
-
-CREATE POLICY "Users can insert own profiles"
-  ON profiles FOR INSERT
-  WITH CHECK (auth.uid() = user_id);
-
-CREATE POLICY "Users can update own profiles"
-  ON profiles FOR UPDATE
-  USING (auth.uid() = user_id);
-
--- sessions 表策略（通过 profile_id 关联到 user_id）
-CREATE POLICY "Users can view own sessions"
-  ON sessions FOR SELECT
-  USING (
-    profile_id IN (
-      SELECT id FROM profiles WHERE user_id = auth.uid()
-    )
-  );
-
-CREATE POLICY "Users can insert own sessions"
-  ON sessions FOR INSERT
-  WITH CHECK (
-    profile_id IN (
-      SELECT id FROM profiles WHERE user_id = auth.uid()
-    )
-  );
-
-CREATE POLICY "Users can update own sessions"
-  ON sessions FOR UPDATE
-  USING (
-    profile_id IN (
-      SELECT id FROM profiles WHERE user_id = auth.uid()
-    )
-  );
-
--- agent_executions 表策略（通过 session_id -> profile_id -> user_id 链式关联）
-CREATE POLICY "Users can view own executions"
-  ON agent_executions FOR SELECT
-  USING (
-    session_id IN (
-      SELECT s.id FROM sessions s
-      JOIN profiles p ON s.profile_id = p.id
-      WHERE p.user_id = auth.uid()
-    )
-  );
-
-CREATE POLICY "Users can insert own executions"
-  ON agent_executions FOR INSERT
-  WITH CHECK (
-    session_id IN (
-      SELECT s.id FROM sessions s
-      JOIN profiles p ON s.profile_id = p.id
-      WHERE p.user_id = auth.uid()
-    )
-  );
-
--- tool_invocations 表策略（同 agent_executions）
-CREATE POLICY "Users can view own tool invocations"
-  ON tool_invocations FOR SELECT
-  USING (
-    session_id IN (
-      SELECT s.id FROM sessions s
-      JOIN profiles p ON s.profile_id = p.id
-      WHERE p.user_id = auth.uid()
-    )
-  );
-
-CREATE POLICY "Users can insert own tool invocations"
-  ON tool_invocations FOR INSERT
-  WITH CHECK (
-    session_id IN (
-      SELECT s.id FROM sessions s
-      JOIN profiles p ON s.profile_id = p.id
-      WHERE p.user_id = auth.uid()
-    )
-  );
-
--- debate_rounds 表策略
-CREATE POLICY "Users can view own debate rounds"
-  ON debate_rounds FOR SELECT
-  USING (
-    session_id IN (
-      SELECT s.id FROM sessions s
-      JOIN profiles p ON s.profile_id = p.id
-      WHERE p.user_id = auth.uid()
-    )
-  );
-
--- entities 表策略
-CREATE POLICY "Users can view own entities"
-  ON entities FOR SELECT
-  USING (
-    session_id IN (
-      SELECT s.id FROM sessions s
-      JOIN profiles p ON s.profile_id = p.id
-      WHERE p.user_id = auth.uid()
-    )
-  );
-
--- entity_relations 表策略（通过 source_id -> entities -> session_id 关联）
-CREATE POLICY "Users can view own entity relations"
-  ON entity_relations FOR SELECT
-  USING (
-    source_id IN (
-      SELECT e.id FROM entities e
-      JOIN sessions s ON e.session_id = s.id
-      JOIN profiles p ON s.profile_id = p.id
-      WHERE p.user_id = auth.uid()
-    )
-  );
-
--- ============================================
--- 幂等键唯一约束
--- ============================================
-ALTER TABLE tool_invocations 
-ADD CONSTRAINT unique_idempotency_key UNIQUE (idempotency_key);
-```
+RLS 策略：当前开发阶段采用 `Allow all for development`（便于验收与调试）；后续 Phase 3/4 再收紧。
 
 ### 5.2 实体类型定义
 
@@ -711,86 +830,51 @@ ADD CONSTRAINT unique_idempotency_key UNIQUE (idempotency_key);
 ```
 基础路径: /api/v2
 
-# 会话管理
-POST   /sessions                    # 创建新会话
-GET    /sessions/{id}               # 获取会话详情
-GET    /sessions/{id}/agents        # 获取会话中所有 Agent 执行状态
-GET    /sessions/{id}/entities      # 获取会话中识别的实体
-GET    /sessions/{id}/debates       # 获取会话中辩论记录 [新增]
-DELETE /sessions/{id}               # 归档会话
-
-# 洞察分析
-POST   /insights/market             # 流式市场洞察分析（含辩论）
-GET    /insights/market/{id}/status # 获取分析进度
-
-# 评论分析（独立功能，保留）
-POST   /reviews/analyze             # 流式评论分析报告
-GET    /reviews/{id}/status         # 获取分析进度
-
-# 行动计划
-POST   /actions/plan                # 生成行动计划
-POST   /actions/evaluate-risk       # 风险评估
-
-# 报告导出
-POST   /reports/generate            # 生成 HTML 报告
-POST   /reports/export-pdf          # 导出 PDF
-GET    /reports/{id}                # 获取报告详情
+# Market Insight v2
+POST   /market-insight/stream                # SSE 流式输出（推荐）
+POST   /market-insight/generate              # 同步生成（一次性返回）
+GET    /market-insight/status/{session_id}   # 查询会话状态（Phase 1：从 DB 读取）
+GET    /market-insight/health                # 健康检查
 ```
 
 ### 6.2 请求/响应示例
 
-**创建会话**
+**同步生成（推荐用于稳定性验证）**
 
 ```json
-// POST /api/v2/sessions
-// Request
+// POST /api/v2/market-insight/generate
 {
   "profile": {
     "target_market": "Germany",
     "supply_chain": "Consumer Electronics",
-    "seller_type": "Cross-border E-commerce",
-    "min_price": 50,
-    "max_price": 200
-  }
-}
-
-// Response
-{
-  "session_id": "uuid-xxx",
-  "status": "active",
-  "created_at": "2026-02-07T10:00:00Z"
+    "seller_type": "brand",
+    "min_price": 30,
+    "max_price": 90
+  },
+  "debate_rounds": 0,
+  "enable_followup": false,
+  "enable_websearch": false
 }
 ```
 
-**流式市场洞察（含辩论）**
+**SSE 流式输出（推荐用于前端体验验证）**
 
-```json
-// POST /api/v2/insights/market
-// Request
-{
-  "session_id": "uuid-xxx",
-  "options": {
-    "enable_websearch": true,
-    "enable_social": true,
-    "debate_rounds": 2,
-    "parallel_agents": true
-  }
-}
+```text
+// POST /api/v2/market-insight/stream
+event: orchestrator_start
+data: {"event":"orchestrator_start","timestamp":"..."}
 
-// Response (SSE Stream)
-data: {"event": "orchestrator_start", "timestamp": "..."}
-data: {"event": "agent_start", "agent": "trend_scout"}
-data: {"event": "agent_thinking", "agent": "trend_scout", "content": "我需要分析..."}
-data: {"event": "tool_start", "tool": "web_search", "agent": "trend_scout"}
-data: {"event": "tool_end", "tool": "web_search", "agent": "trend_scout", "duration": 1.2}
-data: {"event": "agent_output", "agent": "trend_scout", "content": "## 市场趋势..."}
-data: {"event": "agent_end", "agent": "trend_scout", "status": "completed"}
-data: {"event": "debate_round_start", "round": 2, "type": "challenge"}
-data: {"event": "agent_challenge", "from": "competitor_analyst", "to": "trend_scout", "content": "..."}
-data: {"event": "agent_respond", "agent": "trend_scout", "content": "...", "revised": true}
-data: {"event": "consensus_reached", "summary": "...", "confidence": 0.85}
-data: {"event": "orchestrator_end", "final_report": "..."}
+event: agent_start
+data: {"event":"agent_start","agent":"trend_scout","timestamp":"..."}
+
+...
+
+event: orchestrator_end
+data: {"event":"orchestrator_end","session_id":"<uuid>","final_report":"...","timestamp":"..."}
 ```
+
+> 提示：Swagger UI 不适合验证 SSE（长响应会导致渲染异常或中断）。Windows 上若使用 conda 自带 curl，可能出现请求体双引号被剥离导致 422。
+> 推荐使用系统 curl：`C:\\Windows\\System32\\curl.exe` 并用 stdin 喂 JSON（见 `PHASE1_ACCEPTANCE.md`）。
 
 ### 6.3 流式协议事件类型
 
@@ -829,6 +913,8 @@ data: {"event": "orchestrator_end", "final_report": "..."}
 | **Context 膨胀** | 辩论多轮导致 Token 超限 | 高 | 分层记忆 + 摘要压缩 + 只保留关键质疑 |
 | **协调开销** | 多 Agent + 辩论增加延迟 | 中 | 并行执行无依赖任务，辩论轮次可配置 |
 | **错误传播** | 单 Agent 失败影响全流程 | 中 | 熔断机制 + 降级策略 + 重试逻辑 |
+| **SSE 代理缓冲** | 前端长时间无增量更新，误判“卡住” | 中 | 设置 `X-Accel-Buffering: no`，禁用 SSE 路径压缩，增加心跳事件 |
+| **SSE 连接上限（HTTP/1.1）** | 多标签页并发时连接被抢占或中断 | 中 | 控制并发连接、复用会话流、优先使用 HTTP/2 |
 | **复杂性增加** | 维护成本上升 | 高 | 完善文档 + 单元测试 + 可观测性工具 |
 
 ---
@@ -837,25 +923,29 @@ data: {"event": "orchestrator_end", "final_report": "..."}
 
 ### 8.1 Phase 1 验收标准
 
-- [ ] 后端代码按新目录结构组织（无 validation 模块）
-- [ ] BaseAgent 抽象类可被子类正确继承
-- [ ] 前端 WeaveContext 正常管理全局状态（无 validation 相关）
-- [ ] Supabase 数据表创建成功且可正常 CRUD
-- [ ] IGraphEngine 接口定义完成
-- [ ] SSE 事件协议文档完成（含 debate_* 事件）
+- [x] 后端代码按新目录结构组织（无 validation/v1 模块）
+- [x] BaseAgent 抽象类可被子类正确继承
+- [x] 前端全局状态由 Context + Reducer 管理（无 validation 相关）
+- [x] 本地 Supabase/Postgres 数据表可正常 CRUD（sessions/agent_results/debate_exchanges/workflow_events）
+- [x] IGraphEngine 接口定义完成
+- [x] SSE 事件协议定义完成（含 debate_* 事件）
+- [x] `/api/v2/market-insight/stream` 可跑通并返回 `orchestrator_end.final_report`
+- [x] 触发一次工作流后，关键状态与结果能落库（sessions/agent_results/debate_exchanges/workflow_events 可查询）
 
 ### 8.2 Phase 2 验收标准
 
-- [ ] Orchestrator 能正确分解用户请求
-- [ ] 4 个市场洞察子 Agent 可并行执行
-- [ ] SocialSentinel 能获取 Reddit 数据
-- [ ] DebateCoordinator 能协调 2-3 轮辩论
-- [ ] 辩论过程中 Agent 能提出质疑并回应
-- [ ] 最终输出包含共识结论与分歧标注
-- [ ] Orchestrator 支持节点级重试/降级
-- [ ] Agent 执行状态正确记录到 Supabase
-- [ ] 流式输出包含辩论生命周期事件
-- [ ] 最终报告质量不低于原单体 Agent
+- [x] Orchestrator 能正确分解用户请求
+- [x] 4 个市场洞察子 Agent 可并行执行
+- [x] SocialSentinel 基于 Ark `web_search` 可稳定输出社媒洞察（Reddit API 直连后置到 Phase 4）
+- [x] DebateCoordinator 能协调 2-3 轮辩论
+- [x] 辩论过程中 Agent 能提出质疑并回应
+- [x] 最终输出包含共识结论与分歧标注（由 Synthesizer 结构化输出）
+- [x] Orchestrator 支持节点级重试/降级
+- [x] 重试耗尽后可按策略降级（`skip` / `partial` / `fail`）并有可追踪事件
+- [x] Agent 执行状态正确记录到 Supabase/Postgres
+- [x] 流式输出包含辩论生命周期事件
+- [x] SSE 在"客户端中断重连 + 反向代理缓冲关闭"场景下稳定
+- [x] 最终报告质量不低于原单体 Agent
 
 ### 8.3 Phase 3 验收标准
 
@@ -906,10 +996,16 @@ Week 7-8: Phase 5 - 前端升级 + 测试 + 文档
 ## 十、附录
 ### C. 参考资源
 
-- [LangGraph Documentation](https://langchain-ai.github.io/langgraph/) - 多 Agent 模式参考
+- [LangGraph Documentation](https://docs.langchain.com/oss/python/langgraph/overview) - 图编排、状态路由、checkpoint
+- [LangGraph RetryPolicy（概念/示例）](https://docs.langchain.com/oss/python/langgraph/overview) - 节点级重试能力（重试耗尽需业务侧降级）
 - [Supabase Documentation](https://supabase.com/docs) - 数据库与 Realtime
+- [Supabase RLS](https://supabase.com/docs/guides/database/postgres/row-level-security) - RLS 策略与开发/生产差异
 - [PRAW Documentation](https://praw.readthedocs.io/) - Reddit API
 - [FastAPI Streaming](https://fastapi.tiangolo.com/advanced/custom-response/#streamingresponse) - 流式响应
+- [Starlette Responses](https://www.starlette.io/responses/) - `StreamingResponse` 与 SSE 第三方实现说明
+- [sse-starlette](https://github.com/sysid/sse-starlette) - `EventSourceResponse` 参考实现
+- [MDN SSE](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events) - SSE 协议格式与重连行为
+- [PostgreSQL INSERT](https://www.postgresql.org/docs/current/sql-insert.html) - `ON CONFLICT` 原子 upsert 语义
 - [React Context](https://react.dev/reference/react/useContext) - 状态管理
 
 ---
@@ -918,4 +1014,9 @@ Week 7-8: Phase 5 - 前端升级 + 测试 + 文档
 > **版本历史**:
 > - v1.0 (2026-02-07): 初始版本
 > - v2.0 (2026-02-07): 删除 Data Validation Swarm，新增多轮辩论机制与社交舆情数据源
-> - v2.1 (2026-02-07): 保留评论分析师 Agent（独立功能）；补强 P1-6 范围控制、RLS 策略、幂等键规则、IGraphEngine 接口定义
+> - v2.1 (2026-02-07): 补强 P1-6 范围控制、RLS 策略、幂等键规则、IGraphEngine 接口定义
+> - v2.2 (2026-02-08): 新增 Agent 角色模型设定（2.3 Agent-Model 映射 + 2.4 角色详细设定 + 2.5 辩论机制细化 + 3.3 Ark API 调用规范）
+> - v2.3 (2026-02-10): 完成 Phase 1 可验收闭环（本地 Supabase/Postgres + 002/003 迁移 + SSE 最小落库 + /status 查询）；仓库专注 Market Insight v2
+> - v2.4 (2026-02-11): 调整 Phase 2 验收口径，Reddit API 直连后置到 Phase 4（P4-3/P4-4），Phase 2 以 Ark `web_search` 社媒洞察为准
+> - v2.5 (2026-02-12): 根据官方文档补充 Phase 2 收口项（重试耗尽降级策略、SSE 断连恢复与代理缓冲兼容性验收），并更新参考链接
+> - v2.6 (2026-02-13): 补充 Phase 2 收口实测记录（`debate_rounds` 路由、断连恢复、落库校验、UUID 注意事项与 Ark 偶发连接波动说明）

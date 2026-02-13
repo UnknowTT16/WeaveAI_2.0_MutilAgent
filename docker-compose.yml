@@ -5,15 +5,9 @@ services:
     image: weaveai-backend:latest
     env_file:
       - ./backend/.env
-    environment:
-      - CHROME_PATH=/usr/bin/chromium
     ports:
       - "8000:8000"
-    volumes:
-      - ./backend/static/reports:/app/static/reports
-    shm_size: 1gb           # 关键：增大 /dev/shm，供 pandarallel 使用
-    mem_limit: 6g          # 新增：容器内存上限（确保小于宿主机可用内存）
-    mem_reservation: 4g    # 可选：提示 Docker 给容器预留至少 4GB
+    # WeaveAI 2.0 不再依赖 v1 的 PDF/数据分析模块，无需挂载 reports 或放大 /dev/shm
 
 
   frontend:

@@ -1,17 +1,18 @@
 // frontend/app/page.js
 'use client';
 
-import { useState, useMemo, useEffect } from 'react'; // 引入 useEffect
-import ProfileForm from './components/ProfileForm';
-import ReportDisplay from './components/ReportDisplay';
-import ProfileSidebar from './components/ProfileSidebar';
-import ValidationDashboard from './components/ValidationDashboard';
-import ActionPlanner from './components/ActionPlanner';
-import CommandModal from './components/CommandModal';
-import StepsIndicator from './components/StepsIndicator';
+import { useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { visit } from 'unist-util-visit';
+
+import ProfileForm from './components/ProfileForm';
+import ProfileSidebar from './components/ProfileSidebar';
+import CommandModal from './components/CommandModal';
+import { SkeletonText } from './components/Skeleton';
+
+import { useWorkflowState, useWorkflowActions, useWorkflowDerived } from '../contexts/WorkflowContext';
+import { useStreamV2 } from '../hooks/useStreamV2';
 
 function remarkAddTargetBlank() {
   return (tree) => {
@@ -22,212 +23,172 @@ function remarkAddTargetBlank() {
   };
 }
 
-export default function Home() {
-  const [userProfile, setUserProfile] = useState(null);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [reportContent, setReportContent] = useState(''); 
-  const [error, setError] = useState('');
-  const [validationSummary, setValidationSummary] = useState('');
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [activeStep, setActiveStep] = useState('insight');
-  
-  const [analysisResults, setAnalysisResults] = useState({});
-  const [sentimentAiReport, setSentimentAiReport] = useState({ thinking: '', report: '' });
-  const [enableWebsearch, setEnableWebsearch] = useState(false);
-  const [reportTrigger, setReportTrigger] = useState(0);
+function AgentCard({ agentName, result }) {
+  const status = result?.status || 'pending';
+  const statusText = status === 'running' ? '进行中' : status === 'completed' ? '已完成' : status === 'failed' ? '失败' : '等待中';
+  const statusColor = status === 'running'
+    ? 'bg-amber-900/40 text-amber-200 border-amber-700'
+    : status === 'completed'
+      ? 'bg-emerald-900/30 text-emerald-200 border-emerald-700'
+      : status === 'failed'
+        ? 'bg-red-900/30 text-red-200 border-red-700'
+        : 'bg-gray-900/30 text-gray-300 border-gray-700';
 
-  // 【重大修改】使用 useEffect 在 page.js 中直接处理状态更新
-  useEffect(() => {
-    // 只要 analysisResults 有任何内容，就更新 validationSummary
-    if (analysisResults && Object.keys(analysisResults).length > 0) {
-      const clusteringData = analysisResults['product-clustering']?.clustering_results;
-      
-      if (clusteringData?.product_points) {
-        const summary = `内部数据显示，商品被分成了${clusteringData.cluster_summary.length}个簇。`;
-        setValidationSummary(summary);
-      } else {
-        setValidationSummary('已完成至少一项内部数据验证分析。');
-      }
-    }
-  }, [analysisResults]); // 依赖于 analysisResults 的变化
+  return (
+    <div className="rounded-lg border border-gray-700 bg-gray-900/40 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="font-semibold text-white">{agentName}</div>
+        <div className={`text-xs px-2 py-1 rounded border ${statusColor}`}>{statusText}</div>
+      </div>
+      {result?.error ? (
+        <div className="mt-3 text-sm text-red-200">{result.error}</div>
+      ) : null}
+      {result?.content ? (
+        <div className="mt-3 text-sm text-gray-300 whitespace-pre-wrap">{result.content}</div>
+      ) : null}
+      {status === 'running' && !result?.content ? (
+        <div className="mt-3"><SkeletonText lines={3} /></div>
+      ) : null}
+    </div>
+  );
+}
+
+export default function Home() {
+  const state = useWorkflowState();
+  const actions = useWorkflowActions();
+  const derived = useWorkflowDerived();
+  const { startStream, stopStream } = useStreamV2();
+
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [debateRounds, setDebateRounds] = useState(2);
+
+  const userProfile = state.userProfile;
+  const isGenerating = state.isGenerating;
+  const enableWebsearch = state.enableWebsearch;
+  const report = state.synthesizedReport;
+  const error = state.error;
+
+  const agentEntries = useMemo(() => Object.entries(state.agentResults || {}), [state.agentResults]);
 
   const handleProfileSubmit = (profile) => {
     setIsModalOpen(false);
-    setReportContent('');
-    setError('');
-    setValidationSummary('');
-    setUserProfile(profile);
-    setIsGenerating(false);
-    setActiveStep('insight');
-    setAnalysisResults({});
-    setSentimentAiReport({ thinking: '', report: '' });
-    setEnableWebsearch(false);
-    setReportTrigger(0);
-  };
-
-  const handleGenerationComplete = (finalReport) => {
-    setReportContent(finalReport);
-    setIsGenerating(false);
-  };
-
-  const handleGenerationError = (errorMessage) => {
-    setError(errorMessage);
-    setIsGenerating(false);
-  };
-
-  // 【修改】简化回调函数，现在只负责传递原始数据
-  const handleValidationUpdate = (updates) => {
-    if (updates.results) {
-      setAnalysisResults(updates.results);
-    }
-    if (updates.sentimentReport) {
-      setSentimentAiReport(updates.sentimentReport);
-    }
+    actions.setProfile(profile);
   };
 
   const handleReset = () => {
-    setUserProfile(null);
-    setIsGenerating(false);
-    setReportContent('');
-    setError('');
-    setValidationSummary('');
-    setActiveStep('insight');
-    setAnalysisResults({});
-    setSentimentAiReport({ thinking: '', report: '' });
-    setEnableWebsearch(false);
-    setReportTrigger(0);
+    actions.resetSession();
   };
 
-  const handleStartInsight = () => {
+  const handleStart = async () => {
     if (!userProfile || isGenerating) return;
-    setError('');
-    setReportContent('');
-    setValidationSummary('');
-    setAnalysisResults({});
-    setSentimentAiReport({ thinking: '', report: '' });
-    setIsGenerating(true);
-    setActiveStep('insight');
-    setReportTrigger(prev => prev + 1);
+    actions.clearError();
+    await startStream({
+      profile: userProfile,
+      enableWebsearch,
+      debateRounds,
+    });
   };
-
-  const stepsStatus = useMemo(() => {
-    let status = { 
-      insight: 'current', 
-      validation: 'current', 
-      action: 'upcoming' 
-    };
-    
-    // 【关键】这个判断条件现在可以正确工作了
-    if (reportContent && validationSummary) {
-      status.action = 'current';
-    }
-    
-    return status;
-  }, [reportContent, validationSummary]);
 
   return (
     <main className="min-h-screen bg-gray-900 text-gray-300 flex flex-col">
-      
       {userProfile ? (
         <>
           <header className="text-center py-6 border-b border-gray-800 flex-shrink-0">
-            <h1 className="text-3xl font-bold text-white">📈 WeaveAI 智能分析助手</h1>
-            <p className="text-gray-400 mt-2 text-sm">告别感觉，让数据与AI为您引航</p>
+            <h1 className="text-3xl font-bold text-white">WeaveAI 2.0 多 Agent 市场洞察</h1>
+            <p className="text-gray-400 mt-2 text-sm">Supervisor-Worker + 多轮辩论 + SSE 实时流</p>
           </header>
-          
+
           <div className="flex-grow flex overflow-hidden">
             <aside className="w-72 flex-shrink-0 p-6 border-r border-gray-800 overflow-y-auto">
               <ProfileSidebar profile={userProfile} onReset={handleReset} />
+              <div className="mt-6 rounded-lg border border-gray-800 bg-gray-800/40 p-4">
+                <div className="text-sm text-gray-400">运行参数</div>
+
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <div className="text-sm">联网搜索</div>
+                  <button
+                    type="button"
+                    onClick={() => actions.toggleWebsearch()}
+                    disabled={isGenerating}
+                    className={`px-3 py-1.5 rounded-md text-sm border transition-colors ${
+                      enableWebsearch
+                        ? 'bg-emerald-600/20 text-emerald-200 border-emerald-700 hover:bg-emerald-600/30'
+                        : 'bg-gray-900/30 text-gray-200 border-gray-700 hover:bg-gray-900/50'
+                    } ${isGenerating ? 'opacity-60 cursor-not-allowed' : ''}`}
+                  >
+                    {enableWebsearch ? '已开启' : '已关闭'}
+                  </button>
+                </div>
+
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <div className="text-sm">辩论轮数</div>
+                  <select
+                    value={debateRounds}
+                    onChange={(e) => setDebateRounds(parseInt(e.target.value, 10))}
+                    disabled={isGenerating}
+                    className="bg-gray-900/40 border border-gray-700 rounded-md px-2 py-1.5 text-sm text-gray-200"
+                  >
+                    <option value={0}>0</option>
+                    <option value={1}>1</option>
+                    <option value={2}>2</option>
+                  </select>
+                </div>
+
+                <div className="mt-4 flex flex-col gap-2">
+                  <button
+                    type="button"
+                    onClick={handleStart}
+                    disabled={isGenerating}
+                    className="w-full inline-flex items-center justify-center px-4 py-2 rounded-lg text-sm font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    {isGenerating ? '分析进行中...' : '开始分析'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={stopStream}
+                    disabled={!isGenerating}
+                    className="w-full inline-flex items-center justify-center px-4 py-2 rounded-lg text-sm font-semibold bg-gray-700 hover:bg-gray-600 text-white transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    停止
+                  </button>
+                </div>
+
+                <div className="mt-4 text-xs text-gray-400">
+                  已完成 Agent：{derived.completedAgents}/{derived.totalAgents || 4}
+                </div>
+              </div>
             </aside>
 
             <div className="flex-grow p-6 md:p-8 overflow-y-auto">
-              <div className="mb-10">
-                <StepsIndicator activeStep={activeStep} setActiveStep={setActiveStep} stepsStatus={stepsStatus} />
-              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="bg-gray-800 rounded-lg shadow-lg p-6">
+                  <h2 className="text-xl font-semibold text-white mb-4">执行进度</h2>
+                  <div className="grid grid-cols-1 gap-4">
+                    {agentEntries.length === 0 ? (
+                      <div className="text-sm text-gray-400">尚未开始，点击左侧“开始分析”。</div>
+                    ) : (
+                      agentEntries.map(([agentName, result]) => (
+                        <AgentCard key={agentName} agentName={agentName} result={result} />
+                      ))
+                    )}
+                  </div>
+                  {error ? (
+                    <div className="mt-4 text-red-200 bg-red-900/30 border border-red-700 p-4 rounded-md text-sm">{error}</div>
+                  ) : null}
+                </div>
 
-              <div className="space-y-8">
-                {activeStep === 'insight' && (
-                  <div className="bg-gray-800 rounded-lg shadow-lg p-6">
-                    <h2 className="text-2xl font-semibold text-white mb-4">第一步：机会洞察 (Insight)</h2>
-                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
-                      <p className="text-sm text-gray-400">
-                        {enableWebsearch ? '当前将使用 WebSearch 数据库辅助分析。' : '当前不会调用 WebSearch 数据库。'}
-                      </p>
-                      <div className="flex flex-col sm:flex-row gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setEnableWebsearch(prev => !prev)}
-                          disabled={isGenerating}
-                          className={`inline-flex items-center justify-center px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                            enableWebsearch
-                              ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                              : 'bg-gray-700 hover:bg-gray-600 text-gray-200'
-                          } ${isGenerating ? 'opacity-60 cursor-not-allowed' : ''}`}
-                        >
-                          {enableWebsearch ? '✅ 已启用 WebSearch 数据库' : '🔍 启用 WebSearch 数据库'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleStartInsight}
-                          disabled={isGenerating}
-                          className="inline-flex items-center justify-center px-4 py-2 rounded-lg text-sm font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-                        >
-                          {isGenerating ? '分析进行中...' : '🚀 开始分析'}
-                        </button>
-                      </div>
+                <div className="bg-gray-800 rounded-lg shadow-lg p-6">
+                  <h2 className="text-xl font-semibold text-white mb-4">综合报告</h2>
+                  {isGenerating && !report ? (
+                    <SkeletonText lines={10} />
+                  ) : report ? (
+                    <div className="prose prose-invert max-w-none bg-gray-900/50 p-6 rounded-lg">
+                      <ReactMarkdown remarkPlugins={[remarkGfm, remarkAddTargetBlank]}>{report}</ReactMarkdown>
                     </div>
-                    {isGenerating ? (
-                      <ReportDisplay
-                        profile={userProfile}
-                        startTrigger={reportTrigger}
-                        enableWebsearch={enableWebsearch}
-                        onGenerationComplete={handleGenerationComplete}
-                        onError={handleGenerationError}
-                      />
-                    ) : reportContent ? (
-                      <div className="prose prose-invert max-w-none bg-gray-900/50 p-6 rounded-lg">
-                        <ReactMarkdown remarkPlugins={[remarkGfm, remarkAddTargetBlank]}>{reportContent}</ReactMarkdown>
-                      </div>
-                    ) : (
-                      <div className="text-center py-10">
-                        <p className="text-gray-400">档案已创建，请先在上方选择是否启用 WebSearch，然后点击“开始分析”按钮生成报告。</p>
-                      </div>
-                    )}
-                    {error && !isGenerating && ( <div className="mt-4 text-red-400 bg-red-900/50 p-4 rounded-md"><p>{error}</p></div> )}
-                  </div>
-                )}
-
-                {activeStep === 'validation' && (
-                  <div className="bg-gray-800 rounded-lg shadow-lg p-6">
-                    <h2 className="text-2xl font-semibold text-white mb-4">第二步：自我验证 (Validation)</h2>
-                    <ValidationDashboard 
-                      onValidationUpdate={handleValidationUpdate}
-                      analysisResults={analysisResults}
-                      sentimentAiReport={sentimentAiReport}
-                    />
-                  </div>
-                )}
-
-                {activeStep === 'action' && (
-                   <>
-                    {stepsStatus.action !== 'current' ? (
-                        <div className="text-center p-12 bg-gray-800 rounded-lg">
-                            <h2 className="text-2xl font-semibold text-white mb-4">第三步：行动计划 (Action Plan)</h2>
-                            <p className="text-gray-400">请先完成“机会洞察”并进行至少一次“自我验证”分析，以解锁行动计划。</p>
-                        </div>
-                    ) : (
-                        <div className="bg-gray-800 rounded-lg shadow-lg p-6">
-                            <h2 className="text-2xl font-semibold text-white mb-4">第三步：行动计划 (Action Plan)</h2>
-                            <ActionPlanner 
-                              marketReport={reportContent} 
-                              validationSummary={validationSummary}
-                              sentimentReport={sentimentAiReport.report}
-                              analysisResults={analysisResults}
-                            />
-                        </div>
-                    )}
-                   </>
-                )}
+                  ) : (
+                    <div className="text-sm text-gray-400">报告会在工作流完成后自动出现。</div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -236,24 +197,17 @@ export default function Home() {
         <div className="flex-grow flex items-center justify-center p-4">
           <div className="text-center max-w-2xl w-full">
             <div className="mb-8">
-              <h1 className="text-4xl md:text-5xl font-bold text-white">
-                📈 WeaveAI 智能分析助手
-              </h1>
-              <p className="text-gray-400 mt-4 text-lg">
-                告别感觉，让数据与AI为您引航
-              </p>
+              <h1 className="text-4xl md:text-5xl font-bold text-white">WeaveAI 2.0</h1>
+              <p className="text-gray-400 mt-4 text-lg">多 Agent 市场洞察与辩论式综合报告</p>
             </div>
-            
             <div className="bg-gray-800/50 rounded-xl p-8 shadow-2xl border border-gray-700">
-              <h2 className="text-3xl font-bold text-white mb-4">开始您的跨境选品之旅</h2>
-              <p className="text-gray-400 mb-8">
-                提供您的商业画像，我们的AI战略顾问将为您生成一份高度定制化的市场分析报告，助您发现下一个爆款。
-              </p>
-              <button 
+              <h2 className="text-2xl font-bold text-white mb-4">创建战略档案</h2>
+              <p className="text-gray-400 mb-8">填写目标市场、品类与价格区间，即可开始多 Agent 协作分析。</p>
+              <button
                 onClick={() => setIsModalOpen(true)}
                 className="px-8 py-4 text-lg font-bold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-transform transform hover:scale-105 shadow-lg shadow-indigo-600/30"
               >
-                🚀 开始新的分析
+                开始
               </button>
             </div>
           </div>
