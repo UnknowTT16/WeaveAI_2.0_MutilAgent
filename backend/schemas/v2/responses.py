@@ -25,6 +25,13 @@ class MarketInsightResponse(BaseModel):
     session_id: str
     status: WorkflowStatus = WorkflowStatus.COMPLETED
     report: str = Field(default="", description="综合报告内容")
+    report_html_url: Optional[str] = Field(default=None, description="HTML 报告地址")
+    evidence_pack: Optional[dict[str, Any]] = Field(
+        default=None, description="Phase 3 证据包"
+    )
+    memory_snapshot: Optional[dict[str, Any]] = Field(
+        default=None, description="Phase 3 轻量记忆快照"
+    )
     agent_results: list[dict[str, Any]] = Field(
         default_factory=list, description="各 Agent 执行结果"
     )

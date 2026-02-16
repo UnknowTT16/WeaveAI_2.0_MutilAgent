@@ -1,0 +1,15 @@
+﻿{
+    "profile":  {
+                    "target_market":  "France",
+                    "seller_type":  "个人卖家",
+                    "min_price":  10,
+                    "max_price":  45,
+                    "supply_chain":  "Pet Supplies"
+                },
+    "debate_rounds":  1,
+    "enable_followup":  false,
+    "enable_websearch":  false,
+    "retry_max_attempts":  2,
+    "retry_backoff_ms":  300,
+    "degrade_mode":  "partial"
+}

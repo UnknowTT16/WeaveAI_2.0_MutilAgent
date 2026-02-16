@@ -49,8 +49,8 @@ uv pip install -r requirements.txt
 # Windows PowerShell: 设置环境变量（也可写入 backend/.env）
 # $env:ARK_API_KEY="你的ArkKey"
 
-python.exe -m uvicorn main:app --port 8000
-python.exe -m uvicorn main:app --reload --port 8000
+python.exe -m uvicorn main:app --port 8000 # 生产模式
+python.exe -m uvicorn main:app --reload --port 8000 # 开发模式
 ```
 
 ### 2) 前端

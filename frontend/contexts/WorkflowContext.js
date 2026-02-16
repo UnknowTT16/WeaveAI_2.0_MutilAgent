@@ -40,7 +40,8 @@ export function WorkflowProvider({ children }) {
     toggleWebsearch: () => dispatch(actions.toggleWebsearch()),
     
     // 报告
-    setSynthesizedReport: (report) => dispatch(actions.setSynthesizedReport(report)),
+    setSynthesizedReport: (report, reportHtmlUrl = null) =>
+      dispatch(actions.setSynthesizedReport(report, reportHtmlUrl)),
     
     // SSE 事件处理器
     handleSSEEvent: (event) => {
@@ -52,9 +53,12 @@ export function WorkflowProvider({ children }) {
           }
           break;
         case 'orchestrator_end':
-          if (event.final_report) {
-            dispatch(actions.setSynthesizedReport(event.final_report));
-          }
+          dispatch(
+            actions.setSynthesizedReport(
+              event.final_report || '',
+              event.report_html_url || null
+            )
+          );
           break;
         case 'agent_start':
           dispatch(actions.agentStart(event.agent));
@@ -68,7 +72,14 @@ export function WorkflowProvider({ children }) {
           dispatch(actions.agentChunk(event.agent, event.content || ''));
           break;
         case 'agent_end':
-          dispatch(actions.agentEnd(event.agent, event.duration_ms));
+          dispatch(
+            actions.agentEnd(
+              event.agent,
+              event.duration_ms,
+              event.status || 'completed',
+              event.error || null
+            )
+          );
           break;
         case 'agent_error':
           dispatch(actions.agentError(event.agent, event.error));
@@ -85,7 +96,6 @@ export function WorkflowProvider({ children }) {
         case 'gather_complete':
         case 'debate_round_end':
         case 'agent_followup':
-        case 'agent_followup_end':
           // 当前版本无需前端状态更新，保留以避免 unknown 噪音
           break;
         case 'debate_round_start':
@@ -113,6 +123,19 @@ export function WorkflowProvider({ children }) {
             event.response_content || event.content || event.content_preview || '',
             event.revised
           ));
+          break;
+        case 'agent_followup_end':
+          dispatch(
+            actions.agentFollowup(
+              event.round_number,
+              event.from_agent,
+              event.to_agent,
+              event.followup_content || event.content || ''
+            )
+          );
+          break;
+        case 'adaptive_concurrency':
+          dispatch(actions.toolEnd('adaptive_concurrency', event.agent || 'system', event));
           break;
         case 'consensus_reached':
           dispatch(actions.consensusReached());
@@ -180,7 +203,7 @@ export function useWorkflowDerived() {
   return useMemo(() => {
     // 计算已完成的 Agent 数量
     const completedAgents = Object.values(state.agentResults)
-      .filter(r => r.status === 'completed').length;
+      .filter(r => ['completed', 'degraded', 'skipped'].includes(r.status)).length;
     
     const totalAgents = Object.keys(state.agentResults).length;
     

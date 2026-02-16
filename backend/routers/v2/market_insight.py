@@ -5,7 +5,7 @@ v2 市场洞察 API 端点
 提供 SSE 流式接口，支持 Supervisor-Worker + 多轮辩论 架构
 """
 
-from typing import Optional
+from typing import Optional, Any
 from datetime import datetime
 import json
 import logging
@@ -13,9 +13,11 @@ import asyncio
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse, FileResponse
 from sse_starlette.sse import EventSourceResponse
 
 from core.config import settings
+from core.evidence_pack import build_evidence_pack
 from core.graph_engine import create_market_insight_engine
 from core.exceptions import GraphExecutionError
 from schemas.v2.requests import MarketInsightRequest
@@ -23,10 +25,20 @@ from schemas.v2.responses import MarketInsightResponse, WorkflowStatus
 from agents.factory import agent_factory_for_graph
 from database.event_sink import create_session_event_sink
 from database.pg_client import pg_is_configured, create_pg_client
+from memory import build_memory_snapshot
+from utils.report_export import get_report_file_path, write_html_report
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/market-insight", tags=["Market Insight v2"])
+
+
+def _next_or_end(iterator) -> Optional[dict[str, Any]]:
+    """在线程中安全获取下一条事件，避免 StopIteration 进入 Future。"""
+    try:
+        return next(iterator)
+    except StopIteration:
+        return None
 
 
 # ============================================
@@ -56,7 +68,7 @@ async def stream_market_insight(http_request: Request, request: MarketInsightReq
     - agent_respond_end: 回应完成（含完整内容）
     - agent_followup: 二次追问
     - agent_followup_end: 二次追问完成
-    - orchestrator_end: 工作流完成
+    - orchestrator_end: 工作流完成（含 final_report / report_html_url）
     - error: 系统错误
     """
 
@@ -64,7 +76,11 @@ async def stream_market_insight(http_request: Request, request: MarketInsightReq
         session_id = request.session_id or str(uuid.uuid4())
 
         profile_dict = request.profile.model_dump() if request.profile else {}
-        debate_rounds = request.debate_rounds if request.debate_rounds is not None else settings.default_debate_rounds
+        debate_rounds = (
+            request.debate_rounds
+            if request.debate_rounds is not None
+            else settings.default_debate_rounds
+        )
         config_dict = {
             "debate_rounds": debate_rounds,
             "enable_followup": request.enable_followup,
@@ -107,10 +123,19 @@ async def stream_market_insight(http_request: Request, request: MarketInsightReq
                 "degrade_mode": request.degrade_mode,
             }
 
-            # 流式执行
-            for event in engine.stream(initial_state):
+            # 流式执行（将同步迭代放在线程中，避免阻塞事件循环）
+            stream_iter = iter(engine.stream(initial_state))
+            while True:
                 if await http_request.is_disconnected():
                     logger.info(f"客户端断开连接，session={session_id}")
+                    try:
+                        stream_iter.close()
+                    except Exception:
+                        pass
+                    break
+
+                event = await asyncio.to_thread(_next_or_end, stream_iter)
+                if event is None:
                     break
 
                 # 落库（不阻塞 SSE）
@@ -215,7 +240,11 @@ async def generate_market_insight(request: MarketInsightRequest):
         factory = agent_factory_for_graph()
 
         # 创建图引擎
-        gen_debate_rounds = request.debate_rounds if request.debate_rounds is not None else settings.default_debate_rounds
+        gen_debate_rounds = (
+            request.debate_rounds
+            if request.debate_rounds is not None
+            else settings.default_debate_rounds
+        )
         engine = create_market_insight_engine(
             agent_factory=factory,
             debate_rounds=gen_debate_rounds,
@@ -238,14 +267,18 @@ async def generate_market_insight(request: MarketInsightRequest):
             "degrade_mode": request.degrade_mode,
         }
 
-        # 执行工作流
-        result = engine.invoke(initial_state)
+        # 执行工作流（放在线程中，避免阻塞事件循环）
+        result = await asyncio.to_thread(engine.invoke, initial_state)
+        report_html_url = result.get("report_html_url")
 
         # 构建响应
         return MarketInsightResponse(
             session_id=session_id,
             status=WorkflowStatus.COMPLETED,
             report=result.get("synthesized_report", ""),
+            report_html_url=report_html_url,
+            evidence_pack=result.get("evidence_pack"),
+            memory_snapshot=result.get("memory_snapshot"),
             agent_results=[
                 {
                     "agent_name": r.agent_name,
@@ -299,9 +332,66 @@ async def get_workflow_status(session_id: str):
                 "message": "会话不存在",
             }
 
+        report_path = get_report_file_path(session_id)
+        if not report_path.exists() and session_row.get("synthesized_report"):
+            try:
+                write_html_report(
+                    session_id=session_id,
+                    report_markdown=session_row.get("synthesized_report") or "",
+                    profile=session_row.get("profile") or {},
+                )
+            except Exception as e:
+                logger.warning(f"按需生成 HTML 报告失败: {e}")
+
+        if report_path.exists():
+            session_row["report_html_url"] = (
+                f"/api/v2/market-insight/report/{session_id}.html"
+            )
+
         agent_results = pg.list_agent_results(session_id)
         debate_exchanges = pg.list_debate_exchanges(session_id)
         workflow_events = pg.list_workflow_events(session_id, limit=200)
+
+        # Phase 3：对历史会话按需回补 Evidence Pack / 记忆快照。
+        update_fields: dict[str, Any] = {}
+        profile = session_row.get("profile") if isinstance(session_row.get("profile"), dict) else {}
+        synthesized_report = str(session_row.get("synthesized_report") or "")
+        if synthesized_report:
+            if not isinstance(session_row.get("evidence_pack"), dict):
+                try:
+                    evidence_pack = build_evidence_pack(
+                        session_id=session_id,
+                        profile=profile,
+                        agent_results=agent_results,
+                        debate_exchanges=debate_exchanges,
+                        final_report=synthesized_report,
+                    )
+                    session_row["evidence_pack"] = evidence_pack
+                    update_fields["evidence_pack"] = evidence_pack
+                    update_fields["evidence_generated_at"] = datetime.now()
+                except Exception as e:
+                    logger.warning(f"按需回补 Evidence Pack 失败: {e}")
+
+            if not isinstance(session_row.get("memory_snapshot"), dict):
+                try:
+                    memory_snapshot = build_memory_snapshot(
+                        session_id=session_id,
+                        profile=profile,
+                        agent_results=agent_results,
+                        debate_exchanges=debate_exchanges,
+                        final_report=synthesized_report,
+                    )
+                    session_row["memory_snapshot"] = memory_snapshot
+                    update_fields["memory_snapshot"] = memory_snapshot
+                    update_fields["memory_snapshot_generated_at"] = datetime.now()
+                except Exception as e:
+                    logger.warning(f"按需回补记忆快照失败: {e}")
+
+        if update_fields:
+            try:
+                pg.update_session_fields(session_id, update_fields)
+            except Exception as e:
+                logger.warning(f"回写 Phase 3 结构化结果失败: {e}")
 
         return {
             "session": session_row,
@@ -314,6 +404,45 @@ async def get_workflow_status(session_id: str):
             pg.close()
         except Exception:
             pass
+
+
+# ============================================
+# HTML 报告端点
+# ============================================
+
+
+@router.get("/report/{session_id}.html")
+async def get_html_report(session_id: str, download: bool = False):
+    """获取会话对应的 HTML 报告文件。"""
+    report_path = get_report_file_path(session_id)
+
+    if not report_path.exists() and pg_is_configured():
+        pg = create_pg_client()
+        try:
+            session_row = pg.get_session_row(session_id)
+            if session_row and session_row.get("synthesized_report"):
+                write_html_report(
+                    session_id=session_id,
+                    report_markdown=session_row.get("synthesized_report") or "",
+                    profile=session_row.get("profile") or {},
+                )
+        finally:
+            try:
+                pg.close()
+            except Exception:
+                pass
+
+    if not report_path.exists():
+        raise HTTPException(status_code=404, detail="HTML 报告不存在")
+
+    if download:
+        return FileResponse(
+            path=report_path,
+            media_type="text/html",
+            filename=f"weaveai-report-{session_id}.html",
+        )
+
+    return HTMLResponse(content=report_path.read_text(encoding="utf-8"))
 
 
 # ============================================

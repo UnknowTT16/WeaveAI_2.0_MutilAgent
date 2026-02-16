@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 import logging
 
+import httpx
 from volcenginesdkarkruntime import Ark
 
 from .config import settings, ThinkingMode
@@ -77,7 +78,15 @@ class ArkClientWrapper:
         if not self.api_key:
             raise ConfigurationError("ARK_API_KEY 未配置")
 
-        self._client = Ark(api_key=self.api_key)
+        self._client = Ark(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=httpx.Timeout(
+                timeout=float(settings.ark_timeout_seconds),
+                connect=float(settings.ark_connect_timeout_seconds),
+            ),
+            max_retries=max(0, int(settings.ark_max_retries)),
+        )
 
     @property
     def client(self) -> Ark:
@@ -199,7 +208,11 @@ class ArkClientWrapper:
                             sources.append(url)
                     yield StreamEvent(
                         type=StreamEventType.SEARCH_COMPLETE,
-                        metadata={"sources_count": len(sources)},
+                        metadata={
+                            "sources_count": len(sources),
+                            # 返回来源详情，便于 Phase 3 证据包追溯。
+                            "sources": list(dict.fromkeys(sources)),
+                        },
                     )
 
                 elif chunk_type == "response.web_search_call.searching":
@@ -232,12 +245,24 @@ class ArkClientWrapper:
             }
 
         except Exception as e:
-            logger.error(f"Ark API 调用失败: {e}")
+            request_id = getattr(e, "request_id", None)
+            logger.error(
+                "Ark API 调用失败: %s (type=%s, model=%s, request_id=%s)",
+                e,
+                type(e).__name__,
+                model,
+                request_id,
+            )
             yield StreamEvent(type=StreamEventType.ERROR, content=str(e))
             raise ToolExecutionError(
                 message=f"Ark API 调用失败: {e}",
                 tool_name="ark_responses",
-                details={"model": model, "use_websearch": use_websearch},
+                details={
+                    "model": model,
+                    "use_websearch": use_websearch,
+                    "request_id": request_id,
+                    "exception_type": type(e).__name__,
+                },
             )
 
     def create_response_stream(

@@ -39,10 +39,10 @@ AGENT_DEBATE_CHALLENGER = "debate_challenger"
 # Agent -> Model 映射 (基于用户确认的设计)
 AGENT_MODEL_MAPPING: dict[str, str] = {
     # Worker Agents
-    AGENT_TREND_SCOUT: "doubao-seed-1-8-251228",  # 256k 上下文 + 强联网 + 发散联想
+    AGENT_TREND_SCOUT: "doubao-seed-2-0-pro-260215",  # 2.0旗舰 + 强联网 + 发散联想
     AGENT_COMPETITOR_ANALYST: "deepseek-v3-2-251201",  # 逻辑推理强 + 结构化分析
     AGENT_REGULATION_CHECKER: "kimi-k2-thinking-251104",  # 长文档阅读 + Thinking 模式
-    AGENT_SOCIAL_SENTINEL: "doubao-seed-1-8-251228",  # 中文语感 + 情感理解
+    AGENT_SOCIAL_SENTINEL: "doubao-seed-2-0-pro-260215",  # 2.0旗舰 + 中文语感 + 情感理解
     # Synthesizer
     AGENT_SYNTHESIZER: "kimi-k2-thinking-251104",  # 超长上下文 + 不丢细节
     # Debate Agent
@@ -51,10 +51,11 @@ AGENT_MODEL_MAPPING: dict[str, str] = {
 
 # Agent -> Thinking 模式映射
 AGENT_THINKING_MODE: dict[str, ThinkingMode] = {
-    AGENT_TREND_SCOUT: ThinkingMode.DISABLED,
-    AGENT_COMPETITOR_ANALYST: ThinkingMode.DISABLED,
+    # 采集型 Worker Agent 统一强制开启 thinking
+    AGENT_TREND_SCOUT: ThinkingMode.ENABLED,
+    AGENT_COMPETITOR_ANALYST: ThinkingMode.ENABLED,
     AGENT_REGULATION_CHECKER: ThinkingMode.ENABLED,  # Kimi K2 Thinking
-    AGENT_SOCIAL_SENTINEL: ThinkingMode.DISABLED,
+    AGENT_SOCIAL_SENTINEL: ThinkingMode.ENABLED,
     AGENT_SYNTHESIZER: ThinkingMode.ENABLED,  # Kimi K2 Thinking
     AGENT_DEBATE_CHALLENGER: ThinkingMode.DISABLED,
 }
@@ -101,13 +102,18 @@ class Settings(BaseSettings):
     ark_base_url: str = Field(
         default="https://ark.cn-beijing.volces.com/api/v3", alias="ARK_BASE_URL"
     )
+    ark_timeout_seconds: float = Field(default=120.0, alias="ARK_TIMEOUT_SECONDS")
+    ark_connect_timeout_seconds: float = Field(
+        default=20.0, alias="ARK_CONNECT_TIMEOUT_SECONDS"
+    )
+    ark_max_retries: int = Field(default=2, alias="ARK_MAX_RETRIES")
 
     # 默认模型 (支持 web_search 的模型)
     default_model: str = Field(default="doubao-seed-1-6-250615", alias="DEFAULT_MODEL")
 
     # 备选模型列表 (都支持 web_search)
     supported_models: list[str] = [
-        "doubao-seed-1-8-251228",
+        "doubao-seed-2-0-pro-260215",
         "doubao-seed-1-6-250615",
         "deepseek-v3-2-251201",
         "deepseek-v3-1-terminus",

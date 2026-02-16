@@ -195,16 +195,23 @@ class SessionEventSink:
             return
 
         if event_type == "orchestrator_end":
+            update_fields: dict[str, Any] = {
+                "status": "completed",
+                "phase": "complete",
+                "synthesized_report": event.get("final_report"),
+                "completed_at": datetime.now(),
+            }
+            if isinstance(event.get("evidence_pack"), dict):
+                update_fields["evidence_pack"] = event.get("evidence_pack")
+                update_fields["evidence_generated_at"] = datetime.now()
+            if isinstance(event.get("memory_snapshot"), dict):
+                update_fields["memory_snapshot"] = event.get("memory_snapshot")
+                update_fields["memory_snapshot_generated_at"] = datetime.now()
             self._worker.enqueue(
                 "update_session",
                 (
                     self.session_id,
-                    {
-                        "status": "completed",
-                        "phase": "complete",
-                        "synthesized_report": event.get("final_report"),
-                        "completed_at": datetime.now(),
-                    },
+                    update_fields,
                 ),
             )
             return

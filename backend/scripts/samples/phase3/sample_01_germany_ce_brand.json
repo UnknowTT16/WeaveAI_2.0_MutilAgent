@@ -1,0 +1,15 @@
+﻿{
+    "profile":  {
+                    "target_market":  "Germany",
+                    "seller_type":  "brand",
+                    "min_price":  30,
+                    "max_price":  90,
+                    "supply_chain":  "Consumer Electronics"
+                },
+    "debate_rounds":  2,
+    "enable_followup":  true,
+    "enable_websearch":  false,
+    "retry_max_attempts":  2,
+    "retry_backoff_ms":  300,
+    "degrade_mode":  "partial"
+}

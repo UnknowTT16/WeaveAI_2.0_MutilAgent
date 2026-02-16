@@ -27,8 +27,8 @@ class TrendScoutAgent(BaseAgent):
     - 发现蓝海机会
     - 预警颠覆性变化
 
-    使用模型：doubao-seed-1-8-251228
-    - 256k 上下文
+    使用模型：doubao-seed-2-0-pro-260215
+    - 2.0旗舰多模态通用模型
     - 强联网搜索能力
     - 发散联想能力强
     """

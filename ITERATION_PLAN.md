@@ -1,9 +1,9 @@
 # WeaveAI 2.0 重构与升级迭代计划
 
-> **版本**: 2.6  
+> **版本**: 2.8  
 > **创建日期**: 2026-02-07  
-> **最后更新**: 2026-02-13  
-> **目标**: 多 Agent 协作工作流升级（Market Insight v2：并行收集 + 多轮辩论 + 综合报告 + SSE 流式 + 最小落库闭环）
+> **最后更新**: 2026-02-16  
+> **目标**: 多 Agent 协作工作流升级（Market Insight v2：并行收集 + 多轮辩论 + 综合报告 + SSE 流式 + 最小落库闭环 + 创业比赛可演示交付）
 
 ---
 
@@ -171,10 +171,10 @@
 
 | Agent 名称 | 模型 ID | 选择理由 |
 |-----------|---------|----------|
-| **TrendScout** (趋势侦察员) | `doubao-seed-1-8-251228` | 256k 上下文 + 强联网搜索 + 发散联想能力强 |
+| **TrendScout** (趋势侦察员) | `doubao-seed-2-0-pro-260215` | 2.0旗舰多模态通用 + 强联网搜索 + 发散联想能力强 |
 | **CompetitorAnalyst** (竞争分析师) | `deepseek-v3-2-251201` | 逻辑推理强 + 结构化分析能力优秀 |
 | **RegulationChecker** (法规检查员) | `kimi-k2-thinking-251104` | 长文档阅读 + Thinking 模式深度推理 |
-| **SocialSentinel** (社媒哨兵) | `doubao-seed-1-8-251228` | 中文语感佳 + 情感理解能力强 |
+| **SocialSentinel** (社媒哨兵) | `doubao-seed-2-0-pro-260215` | 2.0旗舰多模态通用 + 中文语感佳 + 情感理解能力强 |
 | **Synthesizer** (综合分析师) | `kimi-k2-thinking-251104` | 超长上下文 + 不丢细节 + 深度整合 |
 | **DebateChallenger** (辩论质疑方) | `deepseek-v3-2-251201` | 批判性思维 + 逻辑反驳能力强 |
 
@@ -511,8 +511,8 @@ Step 3: 质疑方确认/追问
 **模型兼容性备注（火山方舟 Web Search）**
 
 - 当前项目的市场洞察链路依赖 Responses API 的工具调用能力（`web_search`），因此需要选择“联网搜索工具”支持列表中的模型。
-- 兼容 `web_search` 的 model_id（以官方模型列表的“联网搜索工具”章节为准）：`doubao-seed-1-8-251228`、`doubao-seed-1-6-250615`、`deepseek-v3-2-251201`、`deepseek-v3-1-terminus`、`deepseek-v3-1-250821`、`kimi-k2-thinking-251104`、`kimi-k2-250905`。
-- 推荐策略：主力优先选择 `doubao-seed-1-8-251228`；兼容保底使用 `doubao-seed-1-6-250615`（当前项目默认）；DeepSeek/Kimi 作为备选需额外关注其 RPM/TPM 配额与整体吞吐。
+- 兼容 `web_search` 的 model_id（以官方模型列表的“联网搜索工具”章节为准）：`doubao-seed-2-0-pro-260215`、`doubao-seed-1-6-250615`、`deepseek-v3-2-251201`、`deepseek-v3-1-terminus`、`deepseek-v3-1-250821`、`kimi-k2-thinking-251104`、`kimi-k2-250905`。
+- 推荐策略：主力优先选择 `doubao-seed-2-0-pro-260215`；兼容保底使用 `doubao-seed-1-6-250615`（当前项目默认）；DeepSeek/Kimi 作为备选需额外关注其 RPM/TPM 配额与整体吞吐。
 - 若选择不在该支持列表中的模型：需关闭 `use_websearch` 或改为"外部搜索 → 再喂给模型"的工具链，否则会出现工具不可用或调用失败。
 
 ### 3.3 火山引擎 Ark API 调用规范
@@ -527,7 +527,7 @@ from volcenginesdkark import Ark
 client = Ark(api_key=settings.ark_api_key)
 
 response = client.responses.create(
-    model="<model_id>",  # 例如 doubao-seed-1-8-251228
+    model="<model_id>",  # 例如 doubao-seed-2-0-pro-260215
     input=[
         {
             "role": "user",
@@ -570,7 +570,7 @@ response = client.responses.create(
 # Agent-Model 映射配置 (对应 backend/core/config.py)
 AGENT_MODEL_CONFIG = {
     "trend_scout": {
-        "model": "doubao-seed-1-8-251228",
+        "model": "doubao-seed-2-0-pro-260215",
         "use_websearch": True,
         "thinking_mode": "auto",
     },
@@ -585,7 +585,7 @@ AGENT_MODEL_CONFIG = {
         "thinking_mode": "enabled",  # 强制启用深度推理
     },
     "social_sentinel": {
-        "model": "doubao-seed-1-8-251228",
+        "model": "doubao-seed-2-0-pro-260215",
         "use_websearch": True,
         "thinking_mode": "auto",
     },
@@ -733,59 +733,60 @@ backend/
 - ⚠️ 外部依赖波动：辩论阶段偶发 Ark 流式连接中断（`incomplete chunked read` / `Connection error`），当前由重试与降级策略兜底，不阻塞主流程验收。
 - 📎 验收记录参考：`PHASE2_ACCEPTANCE.md`。
 
-### Phase 3: 共享记忆系统 (1.5 周)
+### Phase 3: 比赛证据层与轻量记忆 (0.5~1 周，弹性)
 
-**目标**: 实现跨 Agent 的知识共享与持久化
-
-| 任务 ID | 任务描述 | 优先级 | 预计工时 |
-|--------|---------|-------|---------| 
-| P3-1 | EntityStore 实体图存储实现（使用 Supabase）| 中 | 2 天 |
-| P3-2 | SessionState 会话状态管理（使用 Supabase Realtime）| 中 | 2 天 |
-| P3-3 | Agent Context 注入与记忆检索 | 中 | 2 天 |
-| P3-4 | 自定义 SupabaseCheckpointSaver（迁移 LangGraph 原生 Saver）| 中 | 1 天 |
-
-**交付物**:
-- EntityStore 实现
-- SessionState 实现
-- SupabaseCheckpointSaver
-- 记忆系统使用文档
-
-### Phase 4: 工具系统重构 (1.5 周)
-
-**目标**: 实现可扩展的工具注册与调用、接入社交数据源
+**目标**: 在不大改架构的前提下，优先构建“可证明、可复现、可讲述”的评审证据链。
 
 | 任务 ID | 任务描述 | 优先级 | 预计工时 |
 |--------|---------|-------|---------| 
-| P4-1 | ToolRegistry 工具注册表 + RateLimiter 限流器 | 中 | 1.5 天 |
-| P4-2 | web_search 工具封装（通过 Registry 统一调用）| 中 | 1 天 |
-| P4-3 | reddit_api 工具实现（PRAW 集成）[新增] | 中 | 1.5 天 |
-| P4-4 | social_sentiment 聚合工具（Reddit + 间接 Twitter）[新增] | 中 | 1 天 |
-| P4-5 | tool_invocations 审计写入（异步 + 脱敏）| 中 | 1 天 |
+| P3-1 | Evidence Pack（来源链接 + 关键结论 + 置信度 + 生成时间）结构化输出 | 高 | 1 天 |
+| P3-2 | 轻量记忆快照（按 session 保存实体摘要与结论，不强依赖图数据库）| 高 | 1 天 |
+| P3-3 | 评测样本集（10~20 组）+ 一键回放脚本（用于比赛前稳定性复核） | 高 | 1 天 |
+| P3-4 | （Stretch）Supabase Realtime / 自定义 CheckpointSaver 深化接入 | 中 | 1~2 天 |
 
 **交付物**:
-- ToolRegistry + RateLimiter 实现
-- 迁移后的工具集
-- Reddit API 集成
-- 社交舆情采集工具
-- 工具开发指南
+- Evidence Pack 输出规范（可直接放进路演材料）
+- 轻量记忆快照落库与查询能力
+- 可复现实验样本集与回放脚本
+- （Stretch）Realtime/Checkpoint 深化能力
 
-### Phase 5: 前端体验升级 (1.5 周)
+### Phase 4: 工具层收敛与成本韧性 (0.5~1 周，弹性)
 
-**目标**: 可视化多 Agent 协作与辩论过程
+**目标**: 以“比赛现场稳定演示 + 单次分析成本可解释”为第一优先，收敛工具链复杂度。
 
 | 任务 ID | 任务描述 | 优先级 | 预计工时 |
 |--------|---------|-------|---------| 
-| P5-1 | v2 API 适配（api.js 更新）| 中 | 1 天 |
-| P5-2 | 流式协议升级（支持 Agent 生命周期 + 辩论事件）| 中 | 1.5 天 |
-| P5-3 | AgentOrchestrationView 协作可视化组件 | 低 | 1.5 天 |
-| P5-4 | DebateViewer 辩论过程可视化 [新增] | 低 | 1.5 天 |
-| P5-5 | AgentTimeline 执行时间线组件 | 低 | 1 天 |
+| P4-1 | ToolRegistry Lite：统一接管现有 `web_search` 路径（保留可扩展接口）| 高 | 1 天 |
+| P4-2 | 成本/时延/错误率埋点（按 session 与 agent 统计）| 高 | 1 天 |
+| P4-3 | 成本护栏与降级策略联动（超时/失败自动降级，确保演示不中断）| 高 | 0.5 天 |
+| P4-4 | 热点查询缓存与 Prompt 模板固化（减少抖动，提升复现性）| 中 | 0.5 天 |
+| P4-5 | （Stretch）`reddit_api` 适配器（Feature Flag 控制，失败自动回退 `web_search`）| 中 | 1 天 |
 
 **交付物**:
-- 前端 v2 API 适配
-- Agent 协作可视化组件
-- 辩论过程可视化
-- 流式协议文档
+- ToolRegistry Lite（最小可用 + 可扩展）
+- 成本与稳定性统计报表（可用于答辩）
+- 失败降级与缓存策略说明
+- （Stretch）Reddit 适配器与开关策略
+
+### Phase 5: 参赛演示包装与路演资产 (1~1.5 周)
+
+**目标**: 把“工程可用”升级为“评委 3~5 分钟可感知价值”的演示与路演资产。
+
+| 任务 ID | 任务描述 | 优先级 | 预计工时 |
+|--------|---------|-------|---------| 
+| P5-1 | 评委模式（预置 60 秒极速 / 3 分钟标准 / 深度演示三套场景）| 高 | 1 天 |
+| P5-2 | 关键指标看板（耗时、稳定性、证据覆盖率、降级次数）| 高 | 1 天 |
+| P5-3 | 一键导出路演包（HTML 报告 + 执行摘要 + 关键证据）| 高 | 0.5 天 |
+| P5-4 | 演示保护模式（弱网/断流时自动回补 status，保证现场连续性）| 高 | 0.5 天 |
+| P5-5 | 路演资产文档（Demo Script、FAQ、竞品差异一页纸、风险应答）| 中 | 1 天 |
+| P5-6 | 报告可视化增强（Vega-Lite）：在不压缩正文完整性的前提下，为关键结论补充图表（前端实时页 + 导出 HTML 双端渲染，失败自动回退文本）| 高 | 1 天 |
+
+**交付物**:
+- 评委模式演示入口与三套预置场景
+- 可视化指标看板与稳定性证据
+- 一键导出路演包
+- Demo Script + FAQ + 差异化说明文档
+- 图表增强版综合报告（完整正文 + 关键图表 + 渲染失败回退）
 
 ---
 
@@ -949,29 +950,30 @@ data: {"event":"orchestrator_end","session_id":"<uuid>","final_report":"...","ti
 
 ### 8.3 Phase 3 验收标准
 
-- [ ] 实体识别并存储到 Supabase
-- [ ] 跨 Agent 可查询共享实体
-- [ ] 会话状态正确持久化
-- [ ] SupabaseCheckpointSaver 正常工作
-- [ ] Supabase Realtime 订阅正常工作
+- [ ] 任意 `session_id` 均可生成 Evidence Pack（含来源、结论、置信度、时间戳）
+- [ ] 至少 10 组标准样本可通过脚本一键回放并生成结果快照
+- [ ] `/status/{session_id}` 可回补轻量记忆快照（关键实体/结论）
+- [ ] 关键结论可追溯到 Agent 与来源链接（满足评审追问）
+- [ ] （Stretch）Supabase Realtime / Checkpoint 深化能力可演示
 
 ### 8.4 Phase 4 验收标准
 
-- [ ] ToolRegistry 支持动态注册工具
-- [ ] RateLimiter 正确限制并发（5 QPS）
-- [ ] web_search 通过 Registry 调用
-- [ ] reddit_api 工具功能正常
-- [ ] social_sentiment 能聚合 Reddit + 间接 Twitter
-- [ ] 所有工具调用写入 tool_invocations（异步 + 脱敏）
-- [ ] 工具文档完整
+- [ ] ToolRegistry Lite 接管当前 `web_search` 调用路径（默认路径 100% 覆盖）
+- [ ] 可按 session/agent 输出耗时、错误率与成本统计
+- [ ] 成本护栏生效：超时/失败触发降级后流程仍可产出可读报告
+- [ ] 缓存与模板策略可降低重复演示波动
+- [ ] （Stretch）`reddit_api` 在 Feature Flag 开启时可用，关闭时自动回退
+- [ ] 工具与降级策略文档完整（便于答辩解释）
 
 ### 8.5 Phase 5 验收标准
 
-- [ ] 前端正确调用 v2 API
-- [ ] Agent 协作过程可视化展示
-- [ ] 辩论过程可视化（质疑/回应/共识）
-- [ ] 执行时间线实时更新
-- [ ] 无明显性能退化
+- [ ] 评委模式三套场景（60 秒/3 分钟/深度）可一键跑通
+- [ ] 页面可视化完整展示 Agent、辩论、降级状态与报告下载
+- [ ] 弱网或中断情况下可在 90 秒内通过状态接口恢复展示
+- [ ] 一键导出路演包可直接用于比赛展示
+- [ ] 综合报告支持关键图表增强（Vega-Lite），且保持正文结构与信息完整
+- [ ] 图表在前端实时页与导出 HTML 均可渲染；渲染失败时自动回退为可读文本/原始配置
+- [ ] 完成至少 3 轮完整彩排并形成问题清单与修复闭环
 
 ---
 
@@ -984,11 +986,17 @@ Week 1-2: Phase 1 - 基础架构重构
 Week 3-4.5: Phase 2 - 多 Agent 协作
   └─ Orchestrator + Market Swarm (4 Agent) + DebateCoordinator
 
-Week 5-6: Phase 3 - 共享记忆 + Phase 4 - 工具系统
-  └─ EntityStore + SessionState + ToolRegistry + Reddit/Twitter
+Week 5: Phase 3 - 比赛证据层（Must）
+  └─ Evidence Pack + 轻量记忆快照 + 10~20 组回放样本
 
-Week 7-8: Phase 5 - 前端升级 + 测试 + 文档
-  └─ Agent 可视化 + DebateViewer + 流式协议 + 验收测试
+Week 6: Phase 4 - 工具层收敛（Must）
+  └─ ToolRegistry Lite + 成本韧性 + 降级联动
+
+Week 7: Phase 5 - 参赛演示包装（Must）
+  └─ 评委模式 + 指标看板 + 一键导出路演包 + 图表增强报告
+
+Week 8: 弹性缓冲（Stretch + 彩排）
+  └─ Reddit 适配器/Realtime 强化 + 全链路彩排 + 冻结版本
 ```
 
 ---
@@ -1020,3 +1028,5 @@ Week 7-8: Phase 5 - 前端升级 + 测试 + 文档
 > - v2.4 (2026-02-11): 调整 Phase 2 验收口径，Reddit API 直连后置到 Phase 4（P4-3/P4-4），Phase 2 以 Ark `web_search` 社媒洞察为准
 > - v2.5 (2026-02-12): 根据官方文档补充 Phase 2 收口项（重试耗尽降级策略、SSE 断连恢复与代理缓冲兼容性验收），并更新参考链接
 > - v2.6 (2026-02-13): 补充 Phase 2 收口实测记录（`debate_rounds` 路由、断连恢复、落库校验、UUID 注意事项与 Ark 偶发连接波动说明）
+> - v2.7 (2026-02-15): 按“创业比赛交付”重排 Phase 3/4/5：引入 Must/Stretch 弹性策略，优先证据链、成本韧性与路演演示包装
+> - v2.8 (2026-02-16): 明确将“综合报告图表增强”后置至 Phase 5：采用 Vega-Lite，在保持正文完整性的前提下实现前端实时页 + 导出 HTML 双端可视化，并要求渲染失败自动回退

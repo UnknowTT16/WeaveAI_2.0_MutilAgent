@@ -1,38 +1,86 @@
-/* frontend/app/globals.css */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-body {
-  background-color: #111827;
-  color: #d1d5db;
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+  --card: #fdfdfd;
+  --card-foreground: #171717;
+  --border: rgba(0, 0, 0, 0.08);
+  --accent: #000000;
+  --accent-foreground: #ffffff;
+  --muted: #737373;
+  --muted-foreground: #a1a1a1;
+  --gemini-gradient: linear-gradient(135deg, #4285f4 0%, #9b51e0 50%, #e91e63 100%);
 }
 
-/* Base styles for custom buttons if needed */
-.btn-primary {
-  @apply w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500;
+.dark {
+  --background: #050505;
+  --foreground: #ededed;
+  --card: #111111;
+  --card-foreground: #ededed;
+  --border: rgba(255, 255, 255, 0.1);
+  --accent: #ffffff;
+  --accent-foreground: #000000;
+  --muted: #a1a1a1;
+  --muted-foreground: #737373;
 }
 
-.btn-secondary {
-    @apply inline-flex items-center justify-center rounded-md border border-gray-600 bg-gray-700 px-4 py-2 text-sm font-medium text-gray-300 shadow-sm hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-gray-800;
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground transition-colors duration-300;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
 }
 
+@layer components {
+  .glass {
+    @apply backdrop-blur-xl bg-opacity-70 border border-white/10 dark:border-white/5;
+  }
+  
+  .gemini-text {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500;
+  }
 
-/* Animation definitions for smooth transitions */
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+  .gemini-border {
+    position: relative;
+    border: 1px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .gemini-border::after {
+    content: '';
+    position: absolute;
+    top: -1px; bottom: -1px;
+    left: -1px; right: -1px;
+    background: var(--gemini-gradient);
+    z-index: -1;
+    border-radius: inherit;
+    opacity: 0.3;
+  }
 }
 
-@keyframes fadeOut {
-  from { opacity: 1; transform: translateY(0); }
-  to { opacity: 0; transform: translateY(-10px); }
+/* 极细滚动条 */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
 }
 
-.fade-in {
-  animation: fadeIn 0.5s ease-out forwards;
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
 }
 
-.fade-out {
-  animation: fadeOut 0.5s ease-in forwards;
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-500/20 rounded-full hover:bg-gray-500/40 transition-colors;
+}
+
+/* 移动端优化 */
+@media (max-width: 640px) {
+  .glass {
+    @apply backdrop-blur-lg;
+  }
 }

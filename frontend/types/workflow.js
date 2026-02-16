@@ -11,12 +11,12 @@
 
 /**
  * Agent 状态
- * @typedef {'pending' | 'running' | 'completed' | 'failed'} AgentStatus
+ * @typedef {'pending' | 'running' | 'completed' | 'degraded' | 'skipped' | 'failed'} AgentStatus
  */
 
 /**
  * SSE 事件类型
- * @typedef {'orchestrator_start' | 'orchestrator_end' | 'agent_start' | 'agent_thinking' | 'agent_chunk' | 'agent_end' | 'agent_error' | 'tool_start' | 'tool_end' | 'retry' | 'debate_round_start' | 'debate_round_end' | 'agent_challenge' | 'agent_challenge_end' | 'agent_respond' | 'agent_respond_end' | 'agent_followup' | 'agent_followup_end' | 'consensus_reached' | 'error'} SSEEventType
+ * @typedef {'orchestrator_start' | 'orchestrator_end' | 'agent_start' | 'agent_thinking' | 'agent_chunk' | 'agent_end' | 'agent_error' | 'tool_start' | 'tool_end' | 'retry' | 'debate_round_start' | 'debate_round_end' | 'agent_challenge' | 'agent_challenge_end' | 'agent_respond' | 'agent_respond_end' | 'agent_followup' | 'agent_followup_end' | 'adaptive_concurrency' | 'consensus_reached' | 'error'} SSEEventType
  */
 
 /**
@@ -40,6 +40,7 @@
  * @property {string} responder - 回应方
  * @property {string} challengeContent - 质疑内容
  * @property {string} responseContent - 回应内容
+ * @property {string} [followupContent] - 追问/确认内容
  * @property {boolean} revised - 是否修正
  */
 
@@ -65,6 +66,7 @@
  * @property {number} debateRounds - 配置的辩论轮数
  * @property {number} currentDebateRound - 当前辩论轮次
  * @property {string} synthesizedReport - 最终报告
+ * @property {string} reportHtmlUrl - HTML 报告地址
  * @property {string | null} error - 错误信息
  * @property {boolean} enableWebsearch - 是否启用 WebSearch
  * @property {Object[]} toolEvents - 工具调用事件
@@ -85,6 +87,7 @@ export const AGENT_DISPLAY_NAMES = {
   competitor_analyst: '竞争分析师',
   regulation_checker: '法规检查员',
   social_sentinel: '社媒哨兵',
+  debate_challenger: '裁判Agent',
   synthesizer: '综合分析师',
 };
 

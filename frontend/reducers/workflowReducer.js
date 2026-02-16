@@ -34,6 +34,7 @@ export const ActionTypes = {
   DEBATE_ROUND_START: 'DEBATE_ROUND_START',
   AGENT_CHALLENGE: 'AGENT_CHALLENGE',
   AGENT_RESPOND: 'AGENT_RESPOND',
+  AGENT_FOLLOWUP: 'AGENT_FOLLOWUP',
   CONSENSUS_REACHED: 'CONSENSUS_REACHED',
   
   // 最终报告
@@ -60,6 +61,7 @@ export const initialState = {
   debateRounds: 2,
   currentDebateRound: 0,
   synthesizedReport: '',
+  reportHtmlUrl: '',
   error: null,
   enableWebsearch: false,
   toolEvents: [],
@@ -97,9 +99,12 @@ export function workflowReducer(state, action) {
         userProfile: action.payload,
         // 设置画像时重置相关状态
         synthesizedReport: '',
+        reportHtmlUrl: '',
         error: null,
         agentResults: {},
         debateExchanges: [],
+        toolEvents: [],
+        retryEvents: [],
         currentDebateRound: 0,
         phase: 'init',
         isGenerating: false,
@@ -114,8 +119,11 @@ export function workflowReducer(state, action) {
         isGenerating: true,
         error: null,
         synthesizedReport: '',
+        reportHtmlUrl: '',
         agentResults: {},
         debateExchanges: [],
+        toolEvents: [],
+        retryEvents: [],
         currentDebateRound: 0,
         phase: 'init',
       };
@@ -193,17 +201,27 @@ export function workflowReducer(state, action) {
       };
     
     case ActionTypes.AGENT_END:
+      {
+      const nextStatus = action.payload.status || 'completed';
+      const currentError = state.agentResults[action.payload.agent]?.error || null;
+      const nextError = typeof action.payload.error === 'string'
+        ? action.payload.error
+        : nextStatus === 'completed'
+          ? null
+          : currentError;
       return {
         ...state,
         agentResults: {
           ...state.agentResults,
           [action.payload.agent]: {
             ...state.agentResults[action.payload.agent],
-            status: 'completed',
+            status: nextStatus,
             durationMs: action.payload.durationMs || 0,
+            error: nextError,
           },
         },
       };
+      }
     
     case ActionTypes.AGENT_ERROR:
       return {
@@ -257,6 +275,7 @@ export function workflowReducer(state, action) {
             responder: action.payload.toAgent,
             challengeContent: action.payload.content,
             responseContent: '',
+            followupContent: '',
             revised: false,
           },
         ],
@@ -280,6 +299,26 @@ export function workflowReducer(state, action) {
         debateExchanges: exchanges,
       };
     }
+
+    case ActionTypes.AGENT_FOLLOWUP: {
+      const exchanges = [...state.debateExchanges];
+      const lastExchange = exchanges[exchanges.length - 1];
+      if (
+        lastExchange &&
+        lastExchange.roundNumber === action.payload.roundNumber &&
+        lastExchange.challenger === action.payload.fromAgent &&
+        lastExchange.responder === action.payload.toAgent
+      ) {
+        exchanges[exchanges.length - 1] = {
+          ...lastExchange,
+          followupContent: action.payload.content,
+        };
+      }
+      return {
+        ...state,
+        debateExchanges: exchanges,
+      };
+    }
     
     case ActionTypes.CONSENSUS_REACHED:
       return {
@@ -290,13 +329,24 @@ export function workflowReducer(state, action) {
     // ============================================
     // 最终报告
     // ============================================
-    case ActionTypes.SET_SYNTHESIZED_REPORT:
+    case ActionTypes.SET_SYNTHESIZED_REPORT: {
+      const reportPayload = action.payload;
+      const nextReport =
+        typeof reportPayload === 'string'
+          ? reportPayload
+          : reportPayload?.report || '';
+      const nextReportHtmlUrl =
+        typeof reportPayload === 'string'
+          ? state.reportHtmlUrl
+          : reportPayload?.reportHtmlUrl || state.reportHtmlUrl;
       return {
         ...state,
-        synthesizedReport: action.payload,
+        synthesizedReport: nextReport,
+        reportHtmlUrl: nextReportHtmlUrl,
         phase: 'complete',
         isGenerating: false,
       };
+    }
     
     case ActionTypes.TOGGLE_WEBSEARCH:
       return {
@@ -332,6 +382,7 @@ export function workflowReducer(state, action) {
         responder: d.responder,
         challengeContent: d.challenge_content || '',
         responseContent: d.response_content || '',
+        followupContent: d.followup_content || '',
         revised: !!d.revised,
       }));
 
@@ -342,6 +393,7 @@ export function workflowReducer(state, action) {
         phase: session.phase || state.phase,
         isGenerating: session.status === 'running',
         synthesizedReport: session.synthesized_report || state.synthesizedReport,
+        reportHtmlUrl: session.report_html_url || state.reportHtmlUrl,
         error: session.error_message || state.error,
         currentDebateRound: session.current_debate_round || state.currentDebateRound,
         enableWebsearch:
@@ -373,13 +425,19 @@ export const actions = {
   setError: (error) => ({ type: ActionTypes.SET_ERROR, payload: error }),
   clearError: () => ({ type: ActionTypes.CLEAR_ERROR }),
   toggleWebsearch: () => ({ type: ActionTypes.TOGGLE_WEBSEARCH }),
-  setSynthesizedReport: (report) => ({ type: ActionTypes.SET_SYNTHESIZED_REPORT, payload: report }),
+  setSynthesizedReport: (report, reportHtmlUrl = null) => ({
+    type: ActionTypes.SET_SYNTHESIZED_REPORT,
+    payload: { report, reportHtmlUrl },
+  }),
   
   // Agent 事件 (用于 SSE 事件处理)
   agentStart: (agent) => ({ type: ActionTypes.AGENT_START, payload: { agent } }),
   agentThinking: (agent, content) => ({ type: ActionTypes.AGENT_THINKING, payload: { agent, content } }),
   agentChunk: (agent, content) => ({ type: ActionTypes.AGENT_CHUNK, payload: { agent, content } }),
-  agentEnd: (agent, durationMs) => ({ type: ActionTypes.AGENT_END, payload: { agent, durationMs } }),
+  agentEnd: (agent, durationMs, status = 'completed', error = null) => ({
+    type: ActionTypes.AGENT_END,
+    payload: { agent, durationMs, status, error },
+  }),
   agentError: (agent, error) => ({ type: ActionTypes.AGENT_ERROR, payload: { agent, error } }),
   toolStart: (tool, agent, metadata) => ({ type: ActionTypes.TOOL_START, payload: { tool, agent, metadata } }),
   toolEnd: (tool, agent, metadata) => ({ type: ActionTypes.TOOL_END, payload: { tool, agent, metadata } }),
@@ -394,6 +452,10 @@ export const actions = {
   agentRespond: (roundNumber, fromAgent, toAgent, content, revised) => ({
     type: ActionTypes.AGENT_RESPOND,
     payload: { roundNumber, fromAgent, toAgent, content, revised },
+  }),
+  agentFollowup: (roundNumber, fromAgent, toAgent, content) => ({
+    type: ActionTypes.AGENT_FOLLOWUP,
+    payload: { roundNumber, fromAgent, toAgent, content },
   }),
   consensusReached: () => ({ type: ActionTypes.CONSENSUS_REACHED }),
   hydrateFromStatus: (payload) => ({ type: ActionTypes.HYDRATE_FROM_STATUS, payload }),

@@ -1,0 +1,15 @@
+﻿{
+    "profile":  {
+                    "target_market":  "United States",
+                    "seller_type":  "工厂转型",
+                    "min_price":  25,
+                    "max_price":  120,
+                    "supply_chain":  "Home \u0026 Kitchen"
+                },
+    "debate_rounds":  2,
+    "enable_followup":  true,
+    "enable_websearch":  false,
+    "retry_max_attempts":  2,
+    "retry_backoff_ms":  300,
+    "degrade_mode":  "partial"
+}

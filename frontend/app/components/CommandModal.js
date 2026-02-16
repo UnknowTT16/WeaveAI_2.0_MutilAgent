@@ -1,53 +1,60 @@
-// frontend/app/components/CommandModal.js
 'use client';
 
-import { useState, useEffect } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { X } from 'lucide-react';
+import { useEffect } from 'react';
 
 export default function CommandModal({ isOpen, onClose, children }) {
-  const [show, setShow] = useState(false);
-
+  // 禁用背景滚动
   useEffect(() => {
-    // 当 isOpen 变为 true 时，我们先挂载组件，然后延迟一小段时间再添加 show 类，以触发进入动画
     if (isOpen) {
-      const timer = setTimeout(() => setShow(true), 10); // 10ms delay
-      return () => clearTimeout(timer);
-    } 
-    // 当 isOpen 变为 false 时，我们先移除 show 类以触发出动画，延迟关闭组件
-    else {
-      setShow(false);
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = 'unset';
     }
+    return () => {
+      document.body.style.overflow = 'unset';
+    };
   }, [isOpen]);
 
-  if (!isOpen) return null; // 如果 isOpen 为 false，我们什么都不渲染
-
   return (
-    <div className="relative z-50" aria-labelledby="modal-title" role="dialog" aria-modal="true">
-      {/* Background backdrop, with fade transition */}
-      <div 
-        className={`fixed inset-0 bg-gray-900 bg-opacity-75 transition-opacity duration-300 ease-out ${show ? 'opacity-100' : 'opacity-0'}`}
-      ></div>
+    <AnimatePresence>
+      {isOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
+          {/* Backdrop */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={onClose}
+            className="absolute inset-0 bg-background/80 backdrop-blur-sm dark:bg-black/60"
+          />
 
-      <div className="fixed inset-0 z-50 w-screen overflow-y-auto">
-        <div className="flex min-h-full items-center justify-center p-4 text-center">
-          {/* Modal panel, with scale and fade transition */}
-          <div 
-            className={`relative transform overflow-hidden rounded-lg bg-gray-800 text-left shadow-xl transition-all duration-300 ease-out sm:my-8 sm:w-full sm:max-w-2xl ${show ? 'opacity-100 translate-y-0 sm:scale-100' : 'opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95'}`}
+          {/* Modal Content */}
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 20 }}
+            transition={{ type: 'spring', damping: 20, stiffness: 300 }}
+            className="relative w-full max-w-2xl glass rounded-[2.5rem] shadow-2xl overflow-hidden border border-border"
           >
-            <div className="p-6">
+            {/* Close Button */}
+            <button
+              onClick={onClose}
+              className="absolute right-6 top-6 p-2 rounded-full hover:bg-accent transition-colors z-10"
+            >
+              <X size={20} className="text-muted-foreground" />
+            </button>
+
+            <div className="p-8 sm:p-12">
               {children}
             </div>
-            <div className="bg-gray-700/50 px-4 py-3 sm:flex sm:flex-row-reverse sm:px-6">
-              <button
-                type="button"
-                className="btn-secondary mt-3 sm:mt-0 w-full sm:w-auto"
-                onClick={onClose}
-              >
-                取消
-              </button>
-            </div>
-          </div>
+
+            {/* Footer shadow fade */}
+            <div className="absolute bottom-0 left-0 right-0 h-12 bg-gradient-to-t from-background/10 to-transparent pointer-events-none" />
+          </motion.div>
         </div>
-      </div>
-    </div>
+      )}
+    </AnimatePresence>
   );
 }

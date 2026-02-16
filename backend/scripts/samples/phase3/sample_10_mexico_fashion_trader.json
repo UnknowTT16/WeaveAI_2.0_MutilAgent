@@ -1,0 +1,15 @@
+﻿{
+    "profile":  {
+                    "target_market":  "Mexico",
+                    "seller_type":  "贸易商",
+                    "min_price":  8,
+                    "max_price":  55,
+                    "supply_chain":  "Fashion Accessories"
+                },
+    "debate_rounds":  1,
+    "enable_followup":  false,
+    "enable_websearch":  false,
+    "retry_max_attempts":  2,
+    "retry_backoff_ms":  300,
+    "degrade_mode":  "partial"
+}

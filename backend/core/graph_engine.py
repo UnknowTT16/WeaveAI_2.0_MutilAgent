@@ -16,6 +16,7 @@ from typing import (
     Union,
     Sequence,
 )
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 import logging
@@ -24,6 +25,7 @@ import time
 from datetime import datetime
 import operator
 import asyncio
+import threading
 
 # LangGraph 核心导入
 from langgraph.graph import StateGraph, START, END
@@ -33,14 +35,38 @@ from langgraph.config import get_stream_writer
 
 from core.config import (
     settings,
+    ThinkingMode,
     DEBATE_PEER_PAIRS,
     DEBATE_REDTEAM_TARGETS,
     AGENT_DEBATE_CHALLENGER,
     AGENT_SYNTHESIZER,
 )
 from core.exceptions import GraphExecutionError
+from core.evidence_pack import build_evidence_pack
+from memory import build_memory_snapshot
+from utils.report_export import write_html_report
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================
+# Ark 并发自适应状态（进程内共享）
+# ============================================
+
+_ADAPTIVE_DEFAULT_LIMIT = 4
+_ADAPTIVE_REDUCED_LIMIT = 2
+_ADAPTIVE_FAIL_THRESHOLD = 4
+_ADAPTIVE_RECOVERY_SUCCESS_STREAK = 6
+_ADAPTIVE_REDUCED_WINDOW_SEC = 120.0
+
+_ADAPTIVE_CONCURRENCY_LIMIT = _ADAPTIVE_DEFAULT_LIMIT
+_ADAPTIVE_INFLIGHT_CALLS = 0
+_ADAPTIVE_CONN_FAIL_STREAK = 0
+_ADAPTIVE_SUCCESS_STREAK = 0
+_ADAPTIVE_RECOVER_AFTER_TS = 0.0
+
+_ADAPTIVE_STATE_LOCK = threading.Lock()
+_ADAPTIVE_STATE_COND = threading.Condition(_ADAPTIVE_STATE_LOCK)
 
 
 # ============================================
@@ -157,6 +183,9 @@ class MarketInsightState(TypedDict, total=False):
 
     # 最终输出
     synthesized_report: Optional[str]
+    report_html_url: Optional[str]
+    evidence_pack: Optional[dict[str, Any]]
+    memory_snapshot: Optional[dict[str, Any]]
 
     # 错误信息
     error: Optional[str]
@@ -484,12 +513,133 @@ class MarketInsightGraphEngine(IGraphEngine):
             }
         )
 
-    def _sleep_backoff(self, base_ms: int, attempt: int) -> None:
-        """指数退避休眠。"""
+    def _compute_backoff_ms(
+        self, base_ms: int, attempt: int, jitter_key: Optional[str] = None
+    ) -> int:
+        """计算指数退避时延，并按 key 注入稳定抖动避免并发同频重试。"""
         if base_ms <= 0:
-            return
+            return 0
+
         delay_ms = base_ms * (2 ** max(0, attempt - 1))
+        if jitter_key:
+            token = f"{jitter_key}:{attempt}".encode("utf-8")
+            jitter_bucket = sum(token) % 41  # 0~40%
+            delay_ms += int(base_ms * (jitter_bucket / 100))
+        return delay_ms
+
+    def _sleep_backoff(self, delay_ms: int) -> None:
+        """按计算后的时延休眠。"""
+        if delay_ms <= 0:
+            return
         time.sleep(delay_ms / 1000)
+
+    def _worker_stagger_ms(self, agent_name: str) -> int:
+        """Worker 启动抖动：保持 4 并发但错峰发起首包请求。"""
+        try:
+            idx = self.WORKER_AGENTS.index(agent_name)
+        except ValueError:
+            return 0
+        return idx * 120
+
+    def _is_connection_like_error(self, error: Optional[str]) -> bool:
+        """判断是否属于连接波动类错误。"""
+        if not error:
+            return False
+        text = error.lower()
+        keywords = (
+            "connection error",
+            "request timed out",
+            "timeout",
+            "connect",
+            "network",
+            "ssl",
+            "tls",
+        )
+        return any(k in text for k in keywords)
+
+    def _current_adaptive_limit(self) -> int:
+        """读取当前并发上限。"""
+        with _ADAPTIVE_STATE_LOCK:
+            return _ADAPTIVE_CONCURRENCY_LIMIT
+
+    @contextmanager
+    def _acquire_ark_slot(self) -> Generator[int, None, None]:
+        """获取 Ark 调用并发槽位，支持动态从 4 降到 2。"""
+        global _ADAPTIVE_INFLIGHT_CALLS
+
+        with _ADAPTIVE_STATE_COND:
+            while _ADAPTIVE_INFLIGHT_CALLS >= _ADAPTIVE_CONCURRENCY_LIMIT:
+                _ADAPTIVE_STATE_COND.wait(timeout=0.2)
+            _ADAPTIVE_INFLIGHT_CALLS += 1
+            current_limit = _ADAPTIVE_CONCURRENCY_LIMIT
+
+        try:
+            yield current_limit
+        finally:
+            with _ADAPTIVE_STATE_COND:
+                _ADAPTIVE_INFLIGHT_CALLS = max(0, _ADAPTIVE_INFLIGHT_CALLS - 1)
+                _ADAPTIVE_STATE_COND.notify_all()
+
+    def _record_ark_outcome(
+        self,
+        *,
+        success: bool,
+        error: Optional[str],
+        writer: Optional[Callable] = None,
+    ) -> None:
+        """记录 Ark 调用结果，并在必要时触发并发自适应降载/恢复。"""
+        global _ADAPTIVE_CONCURRENCY_LIMIT
+        global _ADAPTIVE_CONN_FAIL_STREAK
+        global _ADAPTIVE_SUCCESS_STREAK
+        global _ADAPTIVE_RECOVER_AFTER_TS
+
+        changed_to: Optional[int] = None
+        now_ts = time.time()
+
+        with _ADAPTIVE_STATE_COND:
+            if success:
+                _ADAPTIVE_CONN_FAIL_STREAK = 0
+                _ADAPTIVE_SUCCESS_STREAK += 1
+
+                should_recover = (
+                    _ADAPTIVE_CONCURRENCY_LIMIT == _ADAPTIVE_REDUCED_LIMIT
+                    and now_ts >= _ADAPTIVE_RECOVER_AFTER_TS
+                    and _ADAPTIVE_SUCCESS_STREAK >= _ADAPTIVE_RECOVERY_SUCCESS_STREAK
+                )
+                if should_recover:
+                    _ADAPTIVE_CONCURRENCY_LIMIT = _ADAPTIVE_DEFAULT_LIMIT
+                    changed_to = _ADAPTIVE_DEFAULT_LIMIT
+                    _ADAPTIVE_SUCCESS_STREAK = 0
+                    _ADAPTIVE_STATE_COND.notify_all()
+            else:
+                _ADAPTIVE_SUCCESS_STREAK = 0
+                if self._is_connection_like_error(error):
+                    _ADAPTIVE_CONN_FAIL_STREAK += 1
+                    should_reduce = (
+                        _ADAPTIVE_CONCURRENCY_LIMIT == _ADAPTIVE_DEFAULT_LIMIT
+                        and _ADAPTIVE_CONN_FAIL_STREAK >= _ADAPTIVE_FAIL_THRESHOLD
+                    )
+                    if should_reduce:
+                        _ADAPTIVE_CONCURRENCY_LIMIT = _ADAPTIVE_REDUCED_LIMIT
+                        _ADAPTIVE_RECOVER_AFTER_TS = (
+                            now_ts + _ADAPTIVE_REDUCED_WINDOW_SEC
+                        )
+                        changed_to = _ADAPTIVE_REDUCED_LIMIT
+                        _ADAPTIVE_STATE_COND.notify_all()
+                else:
+                    _ADAPTIVE_CONN_FAIL_STREAK = 0
+
+        if changed_to and writer:
+            mode = "degraded" if changed_to == _ADAPTIVE_REDUCED_LIMIT else "recovered"
+            writer(
+                {
+                    "event": "adaptive_concurrency",
+                    "mode": mode,
+                    "concurrency_limit": changed_to,
+                    "reason": error or "network_stable",
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
 
     def _route_after_gather(self, state: MarketInsightState) -> str:
         """gather 后路由：0 轮直达综合，其它进入同行评审。"""
@@ -535,6 +685,7 @@ class MarketInsightGraphEngine(IGraphEngine):
             start_time = time.time()
             max_attempts = max(1, int(state.get("retry_max_attempts", 1)))
             backoff_ms = max(0, int(state.get("retry_backoff_ms", 0)))
+            forced_thinking_mode = ThinkingMode.ENABLED
             degrade_mode = self._resolve_degrade_mode(
                 state.get("degrade_mode", "partial")
             )
@@ -543,11 +694,16 @@ class MarketInsightGraphEngine(IGraphEngine):
                 {
                     "event": "agent_start",
                     "agent": agent_name,
+                    "thinking_mode": forced_thinking_mode.value,
+                    "adaptive_concurrency_limit": self._current_adaptive_limit(),
                     "timestamp": datetime.now().isoformat(),
                 }
             )
 
             last_error: Optional[str] = None
+            stagger_ms = self._worker_stagger_ms(agent_name)
+            if stagger_ms > 0:
+                self._sleep_backoff(stagger_ms)
 
             for attempt in range(1, max_attempts + 1):
                 try:
@@ -584,57 +740,76 @@ class MarketInsightGraphEngine(IGraphEngine):
                             {"role": "user", "content": agent.get_user_prompt(context)},
                         ]
 
-                        for event in agent.ark_client.create_response_stream_v2(
-                            messages=messages,
-                            model=agent.model,
-                            use_websearch=agent.use_websearch,
-                            websearch_limit=agent.websearch_limit,
-                            thinking_mode=getattr(agent, "thinking_mode", None),
-                        ):
-                            if (
-                                event.type == StreamEventType.OUTPUT_DELTA
-                                and event.content
-                            ):
+                        with self._acquire_ark_slot() as slot_limit:
+                            if slot_limit < len(self.WORKER_AGENTS):
                                 writer(
                                     {
-                                        "event": "agent_chunk",
-                                        "agent": agent_name,
-                                        "content": event.content,
-                                    }
-                                )
-                                content_parts.append(event.content)
-                            elif (
-                                event.type == StreamEventType.THINKING_DELTA
-                                and event.content
-                            ):
-                                writer(
-                                    {
-                                        "event": "agent_thinking",
-                                        "agent": agent_name,
-                                        "content": event.content,
-                                    }
-                                )
-                                thinking_parts.append(event.content)
-                            elif event.type == StreamEventType.SEARCH_START:
-                                writer(
-                                    {
-                                        "event": "tool_start",
-                                        "tool": "web_search",
+                                        "event": "adaptive_concurrency",
+                                        "mode": "degraded",
+                                        "concurrency_limit": slot_limit,
                                         "agent": agent_name,
                                         "timestamp": datetime.now().isoformat(),
                                     }
                                 )
-                            elif event.type == StreamEventType.SEARCH_COMPLETE:
-                                meta = event.metadata or {}
-                                writer(
-                                    {
-                                        "event": "tool_end",
-                                        "tool": "web_search",
-                                        "agent": agent_name,
-                                        "sources_count": meta.get("sources_count", 0),
-                                        "timestamp": datetime.now().isoformat(),
-                                    }
-                                )
+
+                            for event in agent.ark_client.create_response_stream_v2(
+                                messages=messages,
+                                model=agent.model,
+                                use_websearch=agent.use_websearch,
+                                websearch_limit=agent.websearch_limit,
+                                thinking_mode=forced_thinking_mode,
+                            ):
+                                if (
+                                    event.type == StreamEventType.OUTPUT_DELTA
+                                    and event.content
+                                ):
+                                    writer(
+                                        {
+                                            "event": "agent_chunk",
+                                            "agent": agent_name,
+                                            "content": event.content,
+                                        }
+                                    )
+                                    content_parts.append(event.content)
+                                elif (
+                                    event.type == StreamEventType.THINKING_DELTA
+                                    and event.content
+                                ):
+                                    writer(
+                                        {
+                                            "event": "agent_thinking",
+                                            "agent": agent_name,
+                                            "content": event.content,
+                                        }
+                                    )
+                                    thinking_parts.append(event.content)
+                                elif event.type == StreamEventType.SEARCH_START:
+                                    writer(
+                                        {
+                                            "event": "tool_start",
+                                            "tool": "web_search",
+                                            "agent": agent_name,
+                                            "timestamp": datetime.now().isoformat(),
+                                        }
+                                    )
+                                elif event.type == StreamEventType.SEARCH_COMPLETE:
+                                    meta = event.metadata or {}
+                                    meta_sources = meta.get("sources")
+                                    if isinstance(meta_sources, list):
+                                        for source in meta_sources:
+                                            if isinstance(source, str) and source not in sources:
+                                                sources.append(source)
+                                    writer(
+                                        {
+                                            "event": "tool_end",
+                                            "tool": "web_search",
+                                            "agent": agent_name,
+                                            "sources_count": meta.get(
+                                                "sources_count", 0
+                                            ),
+                                            "timestamp": datetime.now().isoformat(),
+                                        }
+                                    )
 
                         content = "".join(content_parts)
                         content = agent.post_process(content, context)
@@ -649,6 +824,7 @@ class MarketInsightGraphEngine(IGraphEngine):
                         content = f"[{agent_name}] 模拟输出 - 市场: {target_market} / 品类: {supply_chain}"
 
                     duration_ms = int((time.time() - start_time) * 1000)
+                    self._record_ark_outcome(success=True, error=None, writer=writer)
 
                     result = AgentResult(
                         agent_name=agent_name,
@@ -673,7 +849,13 @@ class MarketInsightGraphEngine(IGraphEngine):
 
                 except Exception as e:
                     last_error = str(e)
+                    self._record_ark_outcome(
+                        success=False, error=last_error, writer=writer
+                    )
                     if attempt < max_attempts:
+                        delay_ms = self._compute_backoff_ms(
+                            backoff_ms, attempt, jitter_key=agent_name
+                        )
                         self._emit_retry_event(
                             writer=writer,
                             target_type="agent",
@@ -681,9 +863,9 @@ class MarketInsightGraphEngine(IGraphEngine):
                             attempt=attempt,
                             max_attempts=max_attempts,
                             error=last_error,
-                            backoff_ms=backoff_ms,
+                            backoff_ms=delay_ms,
                         )
-                        self._sleep_backoff(backoff_ms, attempt)
+                        self._sleep_backoff(delay_ms)
                         continue
 
                     duration_ms = int((time.time() - start_time) * 1000)
@@ -1091,6 +1273,9 @@ class MarketInsightGraphEngine(IGraphEngine):
                 err = str(e)
                 exchange_id = f"r{round_number}:{challenger}->{responder}"
                 if attempt < max_attempts:
+                    delay_ms = self._compute_backoff_ms(
+                        backoff_ms, attempt, jitter_key=exchange_id
+                    )
                     self._emit_retry_event(
                         writer=writer,
                         target_type="debate_exchange",
@@ -1098,9 +1283,9 @@ class MarketInsightGraphEngine(IGraphEngine):
                         attempt=attempt,
                         max_attempts=max_attempts,
                         error=err,
-                        backoff_ms=backoff_ms,
+                        backoff_ms=delay_ms,
                     )
-                    self._sleep_backoff(backoff_ms, attempt)
+                    self._sleep_backoff(delay_ms)
                     continue
 
                 logger.error(f"辩论交换执行失败: {challenger} -> {responder}: {err}")
@@ -1160,47 +1345,53 @@ class MarketInsightGraphEngine(IGraphEngine):
             state.get("enable_websearch", False)
         )
 
-        for event in agent.ark_client.create_response_stream_v2(
-            messages=messages,
-            model=agent.model,
-            use_websearch=effective_websearch,
-            websearch_limit=getattr(agent, "websearch_limit", 0),
-            thinking_mode=getattr(agent, "thinking_mode", None),
-        ):
-            if event.type == StreamEventType.OUTPUT_DELTA and event.content:
-                if emit_chunks:
-                    writer(
-                        {
-                            "event": f"{event_prefix}_chunk",
-                            "agent": agent.name,
-                            "content": event.content,
-                        }
-                    )
-                content_parts.append(event.content)
-            elif event.type == StreamEventType.SEARCH_START:
-                writer(
-                    {
-                        "event": "tool_start",
-                        "tool": "web_search",
-                        "agent": agent.name,
-                        "context": event_prefix,
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                )
-            elif event.type == StreamEventType.SEARCH_COMPLETE:
-                meta = event.metadata or {}
-                writer(
-                    {
-                        "event": "tool_end",
-                        "tool": "web_search",
-                        "agent": agent.name,
-                        "context": event_prefix,
-                        "sources_count": meta.get("sources_count", 0),
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                )
+        try:
+            with self._acquire_ark_slot():
+                for event in agent.ark_client.create_response_stream_v2(
+                    messages=messages,
+                    model=agent.model,
+                    use_websearch=effective_websearch,
+                    websearch_limit=getattr(agent, "websearch_limit", 0),
+                    thinking_mode=getattr(agent, "thinking_mode", None),
+                ):
+                    if event.type == StreamEventType.OUTPUT_DELTA and event.content:
+                        if emit_chunks:
+                            writer(
+                                {
+                                    "event": f"{event_prefix}_chunk",
+                                    "agent": agent.name,
+                                    "content": event.content,
+                                }
+                            )
+                        content_parts.append(event.content)
+                    elif event.type == StreamEventType.SEARCH_START:
+                        writer(
+                            {
+                                "event": "tool_start",
+                                "tool": "web_search",
+                                "agent": agent.name,
+                                "context": event_prefix,
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                        )
+                    elif event.type == StreamEventType.SEARCH_COMPLETE:
+                        meta = event.metadata or {}
+                        writer(
+                            {
+                                "event": "tool_end",
+                                "tool": "web_search",
+                                "agent": agent.name,
+                                "context": event_prefix,
+                                "sources_count": meta.get("sources_count", 0),
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                        )
 
-        return "".join(content_parts)
+            self._record_ark_outcome(success=True, error=None, writer=writer)
+            return "".join(content_parts)
+        except Exception as e:
+            self._record_ark_outcome(success=False, error=str(e), writer=writer)
+            raise
 
     def _build_peer_challenge_prompt(
         self, challenger: str, responder: str, responder_content: str
@@ -1292,8 +1483,11 @@ class MarketInsightGraphEngine(IGraphEngine):
         degrade_mode = self._resolve_degrade_mode(state.get("degrade_mode", "partial"))
 
         synthesized_report: str = ""
+        synthesizer_status = "completed"
+        fallback_reason: Optional[str] = None
+        has_worker_content = any(r.content for r in results)
 
-        if self.agent_factory:
+        if self.agent_factory and has_worker_content:
             for attempt in range(1, max_attempts + 1):
                 try:
                     from agents.base import AgentContext, AgentOutput
@@ -1336,41 +1530,50 @@ class MarketInsightGraphEngine(IGraphEngine):
                     from core.ark_client import StreamEventType
 
                     content_parts = []
-                    for event in synthesizer.ark_client.create_response_stream_v2(
-                        messages=messages,
-                        model=synthesizer.model,
-                        use_websearch=False,
-                        thinking_mode=getattr(synthesizer, "thinking_mode", None),
-                    ):
-                        if event.type == StreamEventType.OUTPUT_DELTA and event.content:
-                            writer(
-                                {
-                                    "event": "agent_chunk",
-                                    "agent": self.SYNTHESIZER,
-                                    "content": event.content,
-                                }
-                            )
-                            content_parts.append(event.content)
-                        elif (
-                            event.type == StreamEventType.THINKING_DELTA
-                            and event.content
+                    with self._acquire_ark_slot():
+                        for event in synthesizer.ark_client.create_response_stream_v2(
+                            messages=messages,
+                            model=synthesizer.model,
+                            use_websearch=False,
+                            thinking_mode=getattr(synthesizer, "thinking_mode", None),
                         ):
-                            writer(
-                                {
-                                    "event": "agent_thinking",
-                                    "agent": self.SYNTHESIZER,
-                                    "content": event.content,
-                                }
-                            )
+                            if (
+                                event.type == StreamEventType.OUTPUT_DELTA
+                                and event.content
+                            ):
+                                writer(
+                                    {
+                                        "event": "agent_chunk",
+                                        "agent": self.SYNTHESIZER,
+                                        "content": event.content,
+                                    }
+                                )
+                                content_parts.append(event.content)
+                            elif (
+                                event.type == StreamEventType.THINKING_DELTA
+                                and event.content
+                            ):
+                                writer(
+                                    {
+                                        "event": "agent_thinking",
+                                        "agent": self.SYNTHESIZER,
+                                        "content": event.content,
+                                    }
+                                )
 
                     synthesized_report = "".join(content_parts)
                     synthesized_report = synthesizer.post_process(
                         synthesized_report, context
                     )
+                    self._record_ark_outcome(success=True, error=None, writer=writer)
                     break
                 except Exception as e:
                     err = str(e)
+                    self._record_ark_outcome(success=False, error=err, writer=writer)
                     if attempt < max_attempts:
+                        delay_ms = self._compute_backoff_ms(
+                            backoff_ms, attempt, jitter_key=self.SYNTHESIZER
+                        )
                         self._emit_retry_event(
                             writer=writer,
                             target_type="agent",
@@ -1378,14 +1581,16 @@ class MarketInsightGraphEngine(IGraphEngine):
                             attempt=attempt,
                             max_attempts=max_attempts,
                             error=err,
-                            backoff_ms=backoff_ms,
+                            backoff_ms=delay_ms,
                         )
-                        self._sleep_backoff(backoff_ms, attempt)
+                        self._sleep_backoff(delay_ms)
                         continue
 
                     logger.error(f"综合报告生成失败: {err}")
                     if degrade_mode == "fail":
                         raise
+                    fallback_reason = f"综合模型调用失败，已使用降级报告: {err}"
+                    synthesizer_status = "degraded"
                     writer(
                         {
                             "event": "agent_error",
@@ -1399,8 +1604,80 @@ class MarketInsightGraphEngine(IGraphEngine):
                         results, debates
                     )
                     break
+        elif self.agent_factory and not has_worker_content:
+            fallback_reason = "无可用的 Worker 输出，已跳过远程综合并生成降级报告"
+            synthesizer_status = "degraded"
+            writer(
+                {
+                    "event": "agent_error",
+                    "agent": self.SYNTHESIZER,
+                    "error": fallback_reason,
+                    "degrade_mode": degrade_mode,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+            synthesized_report = self._generate_fallback_report(results, debates)
         else:
             synthesized_report = self._generate_fallback_report(results, debates)
+
+        generated_at = datetime.now().isoformat()
+        try:
+            evidence_pack = build_evidence_pack(
+                session_id=state["session_id"],
+                profile=state.get("user_profile", {}),
+                agent_results=results,
+                debate_exchanges=debates,
+                final_report=synthesized_report,
+                generated_at=generated_at,
+            )
+        except Exception as e:
+            logger.warning(f"Evidence Pack 生成失败，将回退到最小结构: {e}")
+            evidence_pack = {
+                "version": "phase3.v1",
+                "session_id": state.get("session_id"),
+                "generated_at": generated_at,
+                "claims": [],
+                "sources": [],
+                "traceability": [],
+                "stats": {"claims_count": 0, "sources_count": 0, "debate_count": 0},
+            }
+
+        try:
+            memory_snapshot = build_memory_snapshot(
+                session_id=state["session_id"],
+                profile=state.get("user_profile", {}),
+                agent_results=results,
+                debate_exchanges=debates,
+                final_report=synthesized_report,
+                generated_at=generated_at,
+            )
+        except Exception as e:
+            logger.warning(f"轻量记忆快照生成失败，将回退到最小结构: {e}")
+            memory_snapshot = {
+                "version": "phase3.memory.v1",
+                "session_id": state.get("session_id"),
+                "generated_at": generated_at,
+                "summary": "",
+                "entities": {},
+                "agent_highlights": [],
+                "debate_focus": [],
+                "action_items": [],
+                "risk_items": [],
+            }
+
+        report_html_url: Optional[str] = None
+        try:
+            report_path = write_html_report(
+                session_id=state["session_id"],
+                report_markdown=synthesized_report,
+                profile=state.get("user_profile", {}),
+            )
+            if report_path:
+                report_html_url = (
+                    f"/api/v2/market-insight/report/{state['session_id']}.html"
+                )
+        except Exception as e:
+            logger.warning(f"HTML 报告生成失败: {e}")
 
         duration_ms = int((time.time() - start_time) * 1000)
 
@@ -1408,7 +1685,8 @@ class MarketInsightGraphEngine(IGraphEngine):
             {
                 "event": "agent_end",
                 "agent": self.SYNTHESIZER,
-                "status": "completed",
+                "status": synthesizer_status,
+                "error": fallback_reason,
                 "duration_ms": duration_ms,
                 "timestamp": datetime.now().isoformat(),
             }
@@ -1419,12 +1697,18 @@ class MarketInsightGraphEngine(IGraphEngine):
                 "event": "orchestrator_end",
                 "session_id": state["session_id"],
                 "final_report": synthesized_report,
+                "report_html_url": report_html_url,
+                "evidence_pack": evidence_pack,
+                "memory_snapshot": memory_snapshot,
                 "timestamp": datetime.now().isoformat(),
             }
         )
 
         return {
             "synthesized_report": synthesized_report,
+            "report_html_url": report_html_url,
+            "evidence_pack": evidence_pack,
+            "memory_snapshot": memory_snapshot,
             "phase": WorkflowPhase.COMPLETE,
             "completed_at": datetime.now(),
         }
@@ -1434,11 +1718,24 @@ class MarketInsightGraphEngine(IGraphEngine):
     ) -> str:
         """生成备用报告（无 LLM 时使用）"""
         report_parts = ["# 市场洞察报告\n"]
+        success_count = 0
 
         for result in results:
             if result.content:
+                success_count += 1
                 report_parts.append(f"\n## {result.agent_name}\n")
                 report_parts.append(result.content)
+
+        failed_results = [r for r in results if not r.content and r.error]
+        if failed_results:
+            report_parts.append("\n## 采集异常记录\n")
+            for r in failed_results:
+                report_parts.append(f"- {r.agent_name}: {r.error}\n")
+
+        if success_count == 0:
+            report_parts.append(
+                "\n## 说明\n当前会话未获得可用的上游模型输出，已返回降级报告。"
+            )
 
         if debates:
             report_parts.append("\n## 辩论总结\n")

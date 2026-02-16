@@ -24,14 +24,16 @@ export function useStreamV2() {
   }, []);
 
   const hydrateFromStatus = useCallback(async (sessionId) => {
-    if (!sessionId) return;
+    if (!sessionId) return null;
     try {
       const resp = await fetch(`${API_ENDPOINTS.MARKET_INSIGHT_STATUS}/${sessionId}`);
-      if (!resp.ok) return;
+      if (!resp.ok) return null;
       const data = await resp.json();
       actions.hydrateFromStatus(data);
+      return data;
     } catch (e) {
       console.warn('Failed to hydrate workflow from status API:', e);
+      return null;
     }
   }, [actions]);
   
@@ -110,46 +112,77 @@ export function useStreamV2() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let sawOrchestratorEnd = false;
+      let sawAnyEvent = false;
+
+      const consumeSSEBlocks = (rawText) => {
+        const normalized = rawText
+          .replace(/\r\n/g, '\n')
+          .replace(/\r/g, '\n');
+        const blocks = normalized.split('\n\n');
+        const rest = blocks.pop() || '';
+
+        for (const rawBlock of blocks) {
+          const block = rawBlock.trim();
+          if (!block) continue;
+
+          const dataLines = [];
+          for (const rawLine of block.split('\n')) {
+            const line = rawLine.trimStart();
+            if (line.startsWith(':')) continue;
+            if (line.startsWith('data:')) {
+              dataLines.push(line.slice(5).trimStart());
+            }
+          }
+
+          if (dataLines.length === 0) continue;
+
+          const data = dataLines.join('\n').trim();
+          if (!data) continue;
+
+          if (data === '[DONE]') {
+            sawOrchestratorEnd = true;
+            continue;
+          }
+
+          try {
+            const event = JSON.parse(data);
+            sawAnyEvent = true;
+            if (event.event === 'orchestrator_end') {
+              sawOrchestratorEnd = true;
+            }
+            actions.handleSSEEvent(event);
+          } catch (e) {
+            console.warn('Failed to parse SSE event block:', data, e);
+          }
+        }
+
+        return rest;
+      };
       
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
         
         buffer += decoder.decode(value, { stream: true });
-        
-        // 按行解析 SSE 事件
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || ''; // 保留不完整的行
-        
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6).trim();
-            if (data === '[DONE]') {
-              actions.stopGeneration();
-              continue;
-            }
-            
-            try {
-              const event = JSON.parse(data);
-              // 使用 Context 的 SSE 事件处理器
-              actions.handleSSEEvent(event);
-            } catch (e) {
-              console.warn('Failed to parse SSE event:', data, e);
-            }
-          }
-        }
+        buffer = consumeSSEBlocks(buffer);
       }
-      
-      // 处理剩余的 buffer
-      if (buffer.startsWith('data: ')) {
-        const data = buffer.slice(6).trim();
-        if (data && data !== '[DONE]') {
-          try {
-            const event = JSON.parse(data);
-            actions.handleSSEEvent(event);
-          } catch (e) {
-            console.warn('Failed to parse final SSE event:', data, e);
-          }
+
+      // 处理最后一段（强制补一个空行分隔，确保最后一个 event 也被消费）
+      buffer += decoder.decode();
+      buffer = consumeSSEBlocks(`${buffer}\n\n`);
+
+      if (!abortController.signal.aborted) {
+        let statusPayload = null;
+        if (!sawOrchestratorEnd) {
+          statusPayload = await hydrateFromStatus(sessionId);
+        }
+        const sessionStatus = statusPayload?.session?.status;
+        if (!sawAnyEvent && !statusPayload) {
+          actions.setError('流式连接已建立，但未收到有效事件。请检查后端日志或网络。');
+        }
+        if (sawOrchestratorEnd || sessionStatus !== 'running') {
+          actions.stopGeneration();
         }
       }
       

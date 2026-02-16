@@ -220,6 +220,10 @@ class PgClient:
             "phase",
             "current_debate_round",
             "synthesized_report",
+            "evidence_pack",
+            "memory_snapshot",
+            "evidence_generated_at",
+            "memory_snapshot_generated_at",
             "error_message",
             "completed_at",
             "started_at",
@@ -239,7 +243,7 @@ class PgClient:
         for k, v in fields.items():
             if k not in allowed:
                 continue
-            if k == "profile" and isinstance(v, dict):
+            if k in {"profile", "evidence_pack", "memory_snapshot"} and isinstance(v, dict):
                 v = Json(v)
             sets.append(f"{k} = %s")
             values.append(v)
@@ -344,7 +348,8 @@ class PgClient:
         SELECT id, status, phase, current_debate_round, synthesized_report, error_message,
                created_at, started_at, completed_at, profile,
                target_market, supply_chain, seller_type, min_price, max_price,
-               debate_rounds, enable_followup, enable_websearch
+               debate_rounds, enable_followup, enable_websearch,
+               evidence_pack, memory_snapshot, evidence_generated_at, memory_snapshot_generated_at
         FROM public.sessions
         WHERE id = %s
         """
@@ -358,7 +363,7 @@ class PgClient:
 
     def list_agent_results(self, session_id: str) -> list[dict[str, Any]]:
         sql = """
-        SELECT agent_name, status, duration_ms, error_message, content, thinking, sources,
+        SELECT agent_name, status, duration_ms, confidence, error_message, content, thinking, sources,
                created_at, completed_at
         FROM public.agent_results
         WHERE session_id = %s

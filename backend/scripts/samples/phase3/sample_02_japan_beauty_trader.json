@@ -1,0 +1,15 @@
+﻿{
+    "profile":  {
+                    "target_market":  "Japan",
+                    "seller_type":  "贸易商",
+                    "min_price":  15,
+                    "max_price":  60,
+                    "supply_chain":  "Beauty \u0026 Personal Care"
+                },
+    "debate_rounds":  1,
+    "enable_followup":  true,
+    "enable_websearch":  false,
+    "retry_max_attempts":  2,
+    "retry_backoff_ms":  300,
+    "degrade_mode":  "partial"
+}

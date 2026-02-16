@@ -27,9 +27,9 @@ class SocialSentinelAgent(BaseAgent):
     - 识别 KOL 分布
     - 预警舆论风险
 
-    使用模型：doubao-seed-1-8-251228
-    - 中文语感强
-    - 情感理解能力强
+    使用模型：doubao-seed-2-0-pro-260215
+    - 2.0旗舰多模态通用模型
+    - 中文语感强 + 情感理解能力强
     - 适合社交媒体内容分析
     """
 

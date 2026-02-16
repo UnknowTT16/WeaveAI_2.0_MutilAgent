@@ -1,0 +1,15 @@
+﻿{
+    "profile":  {
+                    "target_market":  "Canada",
+                    "seller_type":  "贸易商",
+                    "min_price":  12,
+                    "max_price":  70,
+                    "supply_chain":  "Office Products"
+                },
+    "debate_rounds":  0,
+    "enable_followup":  false,
+    "enable_websearch":  false,
+    "retry_max_attempts":  2,
+    "retry_backoff_ms":  300,
+    "degrade_mode":  "partial"
+}

@@ -1,0 +1,15 @@
+﻿{
+    "profile":  {
+                    "target_market":  "United Kingdom",
+                    "seller_type":  "品牌方",
+                    "min_price":  20,
+                    "max_price":  85,
+                    "supply_chain":  "Sports \u0026 Outdoors"
+                },
+    "debate_rounds":  2,
+    "enable_followup":  true,
+    "enable_websearch":  false,
+    "retry_max_attempts":  2,
+    "retry_backoff_ms":  300,
+    "degrade_mode":  "partial"
+}

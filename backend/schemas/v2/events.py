@@ -61,6 +61,7 @@ class SSEEventType(str, Enum):
     TOOL_START = "tool_start"
     TOOL_END = "tool_end"
     TOOL_ERROR = "tool_error"
+    ADAPTIVE_CONCURRENCY = "adaptive_concurrency"
 
     # 工作流事件
     CHECKPOINT = "checkpoint"
@@ -106,7 +107,9 @@ class SSEEvent(BaseModel):
 
     # 状态相关
     status: Optional[str] = Field(default=None, description="状态")
+    mode: Optional[str] = Field(default=None, description="模式")
     duration_ms: Optional[int] = Field(default=None, description="耗时(毫秒)")
+    concurrency_limit: Optional[int] = Field(default=None, description="并发上限")
 
     # 错误相关
     error: Optional[str] = Field(default=None, description="错误信息")
@@ -147,6 +150,13 @@ class SSEEvent(BaseModel):
 
     # 最终报告
     final_report: Optional[str] = Field(default=None, description="最终报告")
+    report_html_url: Optional[str] = Field(default=None, description="HTML 报告地址")
+    evidence_pack: Optional[dict[str, Any]] = Field(
+        default=None, description="Phase 3 证据包"
+    )
+    memory_snapshot: Optional[dict[str, Any]] = Field(
+        default=None, description="Phase 3 轻量记忆快照"
+    )
 
     # 扩展数据
     extra: Optional[dict[str, Any]] = Field(default=None, description="扩展数据")

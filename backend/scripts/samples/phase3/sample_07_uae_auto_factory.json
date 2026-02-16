@@ -1,0 +1,15 @@
+﻿{
+    "profile":  {
+                    "target_market":  "UAE",
+                    "seller_type":  "工厂转型",
+                    "min_price":  18,
+                    "max_price":  110,
+                    "supply_chain":  "Automotive Accessories"
+                },
+    "debate_rounds":  2,
+    "enable_followup":  true,
+    "enable_websearch":  false,
+    "retry_max_attempts":  2,
+    "retry_backoff_ms":  300,
+    "degrade_mode":  "partial"
+}

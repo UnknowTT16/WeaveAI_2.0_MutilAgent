@@ -1,0 +1,15 @@
+﻿{
+    "profile":  {
+                    "target_market":  "Singapore",
+                    "seller_type":  "个人卖家",
+                    "min_price":  35,
+                    "max_price":  150,
+                    "supply_chain":  "Smart Gadgets"
+                },
+    "debate_rounds":  2,
+    "enable_followup":  true,
+    "enable_websearch":  false,
+    "retry_max_attempts":  2,
+    "retry_backoff_ms":  300,
+    "degrade_mode":  "partial"
+}
