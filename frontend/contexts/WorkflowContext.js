@@ -90,6 +90,12 @@ export function WorkflowProvider({ children }) {
         case 'tool_end':
           dispatch(actions.toolEnd(event.tool, event.agent, event));
           break;
+        case 'tool_error':
+          dispatch(actions.toolError(event.tool, event.agent, event));
+          break;
+        case 'guardrail_triggered':
+          dispatch(actions.toolEnd('guardrail', event.agent || 'system', event));
+          break;
         case 'retry':
           dispatch(actions.retry(event));
           break;

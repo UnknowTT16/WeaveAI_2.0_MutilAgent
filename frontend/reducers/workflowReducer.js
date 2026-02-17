@@ -28,6 +28,7 @@ export const ActionTypes = {
   AGENT_ERROR: 'AGENT_ERROR',
   TOOL_START: 'TOOL_START',
   TOOL_END: 'TOOL_END',
+  TOOL_ERROR: 'TOOL_ERROR',
   RETRY: 'RETRY',
   
   // 辩论事件
@@ -66,6 +67,7 @@ export const initialState = {
   enableWebsearch: false,
   toolEvents: [],
   retryEvents: [],
+  toolMetrics: null,
 };
 
 /**
@@ -105,6 +107,7 @@ export function workflowReducer(state, action) {
         debateExchanges: [],
         toolEvents: [],
         retryEvents: [],
+        toolMetrics: null,
         currentDebateRound: 0,
         phase: 'init',
         isGenerating: false,
@@ -124,6 +127,7 @@ export function workflowReducer(state, action) {
         debateExchanges: [],
         toolEvents: [],
         retryEvents: [],
+        toolMetrics: null,
         currentDebateRound: 0,
         phase: 'init',
       };
@@ -246,6 +250,12 @@ export function workflowReducer(state, action) {
       return {
         ...state,
         toolEvents: [...state.toolEvents, { ...action.payload, status: 'end' }].slice(-100),
+      };
+
+    case ActionTypes.TOOL_ERROR:
+      return {
+        ...state,
+        toolEvents: [...state.toolEvents, { ...action.payload, status: 'error' }].slice(-100),
       };
 
     case ActionTypes.RETRY:
@@ -400,6 +410,10 @@ export function workflowReducer(state, action) {
           typeof session.enable_websearch === 'boolean'
             ? session.enable_websearch
             : state.enableWebsearch,
+        toolMetrics:
+          payload.tool_metrics && typeof payload.tool_metrics === 'object'
+            ? payload.tool_metrics
+            : state.toolMetrics,
         agentResults: Object.keys(agentResults).length > 0 ? agentResults : state.agentResults,
         debateExchanges: debateExchanges.length > 0 ? debateExchanges : state.debateExchanges,
       };
@@ -441,6 +455,7 @@ export const actions = {
   agentError: (agent, error) => ({ type: ActionTypes.AGENT_ERROR, payload: { agent, error } }),
   toolStart: (tool, agent, metadata) => ({ type: ActionTypes.TOOL_START, payload: { tool, agent, metadata } }),
   toolEnd: (tool, agent, metadata) => ({ type: ActionTypes.TOOL_END, payload: { tool, agent, metadata } }),
+  toolError: (tool, agent, metadata) => ({ type: ActionTypes.TOOL_ERROR, payload: { tool, agent, metadata } }),
   retry: (payload) => ({ type: ActionTypes.RETRY, payload }),
   
   // 辩论事件

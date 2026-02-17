@@ -61,6 +61,7 @@ class SSEEventType(str, Enum):
     TOOL_START = "tool_start"
     TOOL_END = "tool_end"
     TOOL_ERROR = "tool_error"
+    GUARDRAIL_TRIGGERED = "guardrail_triggered"
     ADAPTIVE_CONCURRENCY = "adaptive_concurrency"
 
     # 工作流事件
@@ -102,8 +103,21 @@ class SSEEvent(BaseModel):
 
     # 工具相关
     tool: Optional[str] = Field(default=None, description="工具名称")
+    invocation_id: Optional[str] = Field(default=None, description="工具调用 ID")
+    model_name: Optional[str] = Field(default=None, description="模型名称")
+    cache_hit: Optional[bool] = Field(default=None, description="是否命中缓存")
     input: Optional[dict] = Field(default=None, description="工具输入")
     output: Optional[dict] = Field(default=None, description="工具输出")
+    estimated_input_tokens: Optional[int] = Field(
+        default=None, description="估算输入 token"
+    )
+    estimated_output_tokens: Optional[int] = Field(
+        default=None, description="估算输出 token"
+    )
+    estimated_cost_usd: Optional[float] = Field(
+        default=None, description="估算成本(USD)"
+    )
+    cost_mode: Optional[str] = Field(default=None, description="成本口径")
 
     # 状态相关
     status: Optional[str] = Field(default=None, description="状态")

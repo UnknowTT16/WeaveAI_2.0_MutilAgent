@@ -173,10 +173,7 @@ export function useStreamV2() {
       buffer = consumeSSEBlocks(`${buffer}\n\n`);
 
       if (!abortController.signal.aborted) {
-        let statusPayload = null;
-        if (!sawOrchestratorEnd) {
-          statusPayload = await hydrateFromStatus(sessionId);
-        }
+        const statusPayload = await hydrateFromStatus(sessionId);
         const sessionStatus = statusPayload?.session?.status;
         if (!sawAnyEvent && !statusPayload) {
           actions.setError('流式连接已建立，但未收到有效事件。请检查后端日志或网络。');

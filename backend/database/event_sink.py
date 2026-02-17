@@ -42,6 +42,18 @@ class _AgentBuf:
     thinking: list[str]
 
 
+@dataclass
+class _ToolStartBuf:
+    invocation_id: str
+    tool_name: str
+    agent_name: Optional[str]
+    context: Optional[str]
+    model_name: Optional[str]
+    cache_hit: bool
+    input_payload: dict[str, Any]
+    started_at: datetime
+
+
 class DbWriteWorker:
     def __init__(self, pg: PgClient):
         self._pg = pg
@@ -55,7 +67,7 @@ class DbWriteWorker:
         self._t.start()
 
     def stop(self) -> None:
-        self._stop.set()
+        # 先发送停止哨兵，确保队列里已入队的写操作按顺序处理完成
         try:
             self._q.put_nowait(("__stop__", tuple()))
         except Exception:
@@ -64,6 +76,7 @@ class DbWriteWorker:
             self._t.join(timeout=3)
         except Exception:
             pass
+        self._stop.set()
         try:
             self._pg.close()
         except Exception:
@@ -79,7 +92,8 @@ class DbWriteWorker:
             logger.warning("DB 写入队列已满，丢弃事件")
 
     def _run(self) -> None:
-        while not self._stop.is_set():
+        # 注意：不能以 _stop 作为循环条件，否则 stop() 先置位会导致队列未清空就退出
+        while True:
             kind, args = self._q.get()
             if kind == "__stop__":
                 return
@@ -94,6 +108,8 @@ class DbWriteWorker:
                     self._pg.insert_debate_exchange(*args)  # type: ignore[misc]
                 elif kind == "workflow_event":
                     self._pg.insert_workflow_event(*args)  # type: ignore[misc]
+                elif kind == "insert_tool_invocation":
+                    self._pg.insert_tool_invocation(*args)  # type: ignore[misc]
             except Exception as e:
                 # Phase 1：写入失败不影响主流程
                 logger.warning(f"DB 写入失败({kind}): {e}")
@@ -121,6 +137,7 @@ class SessionEventSink:
             "current_debate_type": None,
         }
         self._exchange_parts: dict[tuple[int, str, str], dict[str, Any]] = {}
+        self._tool_starts: dict[str, _ToolStartBuf] = {}
 
         if self._enabled:
             try:
@@ -168,6 +185,41 @@ class SessionEventSink:
         self._log_workflow_event(event)
 
         if not self._enabled or self._worker is None:
+            return
+
+        if event_type == "tool_start":
+            invocation_id = str(event.get("invocation_id") or "")
+            if not invocation_id:
+                return
+            input_payload = event.get("input")
+            input_payload = input_payload if isinstance(input_payload, dict) else {}
+            self._tool_starts[invocation_id] = _ToolStartBuf(
+                invocation_id=invocation_id,
+                tool_name=str(event.get("tool") or ""),
+                agent_name=str(event.get("agent") or "") or None,
+                context=str(event.get("context") or "") or None,
+                model_name=str(event.get("model_name") or "") or None,
+                cache_hit=bool(event.get("cache_hit")),
+                input_payload=input_payload,
+                started_at=self._parse_timestamp(
+                    event.get("started_at") or event.get("timestamp")
+                )
+                or datetime.now(),
+            )
+            return
+
+        if event_type in ("tool_end", "tool_error"):
+            invocation_id = str(event.get("invocation_id") or "")
+            if not invocation_id:
+                return
+            self._flush_tool_invocation(invocation_id, event)
+            return
+
+        if event_type == "guardrail_triggered":
+            self._worker.enqueue(
+                "update_session",
+                (self.session_id, {"enable_websearch": False}),
+            )
             return
 
         # === Orchestrator ===
@@ -532,6 +584,117 @@ class SessionEventSink:
                 },
             ),
         )
+
+    def _flush_tool_invocation(self, invocation_id: str, event: dict[str, Any]) -> None:
+        if not self._enabled or self._worker is None:
+            return
+
+        start = self._tool_starts.pop(invocation_id, None)
+        started_at = (
+            start.started_at
+            if start is not None
+            else self._parse_timestamp(event.get("started_at")) or datetime.now()
+        )
+        finished_at = (
+            self._parse_timestamp(event.get("finished_at") or event.get("timestamp"))
+            or datetime.now()
+        )
+
+        duration_raw = event.get("duration_ms")
+        if isinstance(duration_raw, int):
+            duration_ms = duration_raw
+        else:
+            duration_ms = max(
+                0,
+                int((finished_at - started_at).total_seconds() * 1000),
+            )
+
+        input_payload: dict[str, Any]
+        event_input = event.get("input")
+        if isinstance(event_input, dict):
+            input_payload = event_input
+        elif start is not None:
+            input_payload = start.input_payload
+        else:
+            input_payload = {}
+
+        output_payload = (
+            event.get("output") if isinstance(event.get("output"), dict) else {}
+        )
+        status = str(event.get("status") or "completed")
+        if event.get("event") == "tool_error":
+            status = "error"
+
+        model_name = str(
+            event.get("model_name") or (start.model_name if start else "") or ""
+        )
+        tool_name = str(event.get("tool") or (start.tool_name if start else "") or "")
+        agent_name = str(
+            event.get("agent") or (start.agent_name if start else "") or ""
+        )
+        context = str(event.get("context") or (start.context if start else "") or "")
+
+        fields: dict[str, Any] = {
+            "session_id": self.session_id,
+            "invocation_id": invocation_id,
+            "agent_name": agent_name,
+            "tool_name": tool_name,
+            "status": status,
+            "duration_ms": duration_ms,
+            "input": input_payload,
+            "output": output_payload,
+            "error_message": event.get("error"),
+            "context": context,
+            "model_name": model_name,
+            "cache_hit": bool(
+                event.get("cache_hit")
+                if event.get("cache_hit") is not None
+                else (start.cache_hit if start else False)
+            ),
+            "estimated_input_tokens": self._parse_int(
+                event.get("estimated_input_tokens")
+            ),
+            "estimated_output_tokens": self._parse_int(
+                event.get("estimated_output_tokens")
+            ),
+            "estimated_cost_usd": self._parse_float(event.get("estimated_cost_usd")),
+            "started_at": started_at,
+            "finished_at": finished_at,
+        }
+
+        self._worker.enqueue("insert_tool_invocation", (fields,))
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            return value
+        if not isinstance(value, str) or not value:
+            return None
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            return datetime.fromisoformat(text)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_int(value: Any) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_float(value: Any) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except Exception:
+            return None
 
 
 def create_session_event_sink(

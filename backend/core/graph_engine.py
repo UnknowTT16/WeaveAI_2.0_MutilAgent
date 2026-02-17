@@ -22,6 +22,7 @@ from enum import Enum
 import logging
 import uuid
 import time
+import copy
 from datetime import datetime
 import operator
 import asyncio
@@ -44,6 +45,7 @@ from core.config import (
 from core.exceptions import GraphExecutionError
 from core.evidence_pack import build_evidence_pack
 from memory import build_memory_snapshot
+from tools import ToolCache, ToolGuardrail, ToolRegistry
 from utils.report_export import write_html_report
 
 logger = logging.getLogger(__name__)
@@ -302,6 +304,17 @@ class MarketInsightGraphEngine(IGraphEngine):
         self._graph: Optional[StateGraph] = None
         self._compiled_graph = None
         self._checkpointer: Optional[MemorySaver] = None
+        self._tool_cache = ToolCache(
+            ttl_seconds=settings.tool_cache_ttl_seconds,
+            max_size=settings.tool_cache_max_size,
+        )
+        self._tool_guardrail = ToolGuardrail(
+            max_estimated_cost_usd=settings.tool_guardrail_max_estimated_cost_usd,
+            max_error_rate=settings.tool_guardrail_max_error_rate,
+            min_calls_for_error_rate=settings.tool_guardrail_min_calls_for_error_rate,
+            action=settings.tool_guardrail_action,
+        )
+        self._tool_registry = ToolRegistry(guardrail=self._tool_guardrail)
 
     def build(self) -> StateGraph:
         """
@@ -541,6 +554,46 @@ class MarketInsightGraphEngine(IGraphEngine):
             return 0
         return idx * 120
 
+    def _build_prompt_hash(self, messages: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for msg in messages:
+            role = str(msg.get("role") or "")
+            content = str(msg.get("content") or "")
+            parts.append(f"{role}:{content}")
+        return ToolCache.hash_prompt(*parts)
+
+    def _build_tool_cache_key(
+        self,
+        *,
+        agent_name: str,
+        model: str,
+        prompt_hash: str,
+        debate_round: int,
+        enable_websearch: bool,
+    ) -> str:
+        return ToolCache.build_key(
+            agent_name=agent_name,
+            model=model,
+            template_version=settings.prompt_template_version,
+            prompt_hash=prompt_hash,
+            debate_round=debate_round,
+            enable_websearch=enable_websearch,
+        )
+
+    def _make_tool_input_payload(
+        self,
+        *,
+        prompt_hash: str,
+        debate_round: int,
+        enable_websearch: bool,
+    ) -> dict[str, Any]:
+        return {
+            "prompt_hash": prompt_hash,
+            "template_version": settings.prompt_template_version,
+            "debate_round": debate_round,
+            "enable_websearch": enable_websearch,
+        }
+
     def _is_connection_like_error(self, error: Optional[str]) -> bool:
         """判断是否属于连接波动类错误。"""
         if not error:
@@ -706,17 +759,24 @@ class MarketInsightGraphEngine(IGraphEngine):
                 self._sleep_backoff(stagger_ms)
 
             for attempt in range(1, max_attempts + 1):
+                active_invocation_id: Optional[str] = None
                 try:
                     thinking_parts: list[str] = []
                     sources: list[str] = []
 
                     if self.agent_factory:
                         agent = self.agent_factory(agent_name)
+                        session_id = str(state.get("session_id") or "")
 
-                        # 统一由工作流开关控制是否允许联网搜索
-                        agent.use_websearch = bool(
+                        requested_websearch = bool(
                             getattr(agent, "use_websearch", False)
                         ) and bool(state.get("enable_websearch", False))
+                        agent.use_websearch = (
+                            self._tool_registry.should_enable_websearch(
+                                session_id=session_id,
+                                requested=requested_websearch,
+                            )
+                        )
 
                         from agents.base import AgentContext
 
@@ -729,7 +789,6 @@ class MarketInsightGraphEngine(IGraphEngine):
 
                         content_parts: list[str] = []
 
-                        # 使用 v2 流式接口
                         from core.ark_client import StreamEventType
 
                         messages = [
@@ -739,6 +798,107 @@ class MarketInsightGraphEngine(IGraphEngine):
                             },
                             {"role": "user", "content": agent.get_user_prompt(context)},
                         ]
+                        prompt_hash = self._build_prompt_hash(messages)
+                        debate_round = int(state.get("current_debate_round", 0) or 0)
+                        tool_input_payload = self._make_tool_input_payload(
+                            prompt_hash=prompt_hash,
+                            debate_round=debate_round,
+                            enable_websearch=bool(agent.use_websearch),
+                        )
+
+                        cache_key: Optional[str] = None
+                        if agent.use_websearch:
+                            cache_key = self._build_tool_cache_key(
+                                agent_name=agent_name,
+                                model=str(agent.model),
+                                prompt_hash=prompt_hash,
+                                debate_round=debate_round,
+                                enable_websearch=True,
+                            )
+                            cached = self._tool_cache.get(cache_key)
+                            if isinstance(cached, dict):
+                                active_invocation_id = (
+                                    self._tool_registry.begin_invocation(
+                                        writer=writer,
+                                        session_id=session_id,
+                                        tool_name="web_search",
+                                        agent_name=agent_name,
+                                        model_name=str(agent.model),
+                                        input_payload=tool_input_payload,
+                                        context="worker",
+                                        cache_hit=True,
+                                    )
+                                )
+                                cached_sources = cached.get("sources")
+                                if not isinstance(cached_sources, list):
+                                    cached_sources = []
+                                end_result = self._tool_registry.end_invocation(
+                                    writer=writer,
+                                    invocation_id=active_invocation_id,
+                                    metadata={
+                                        "sources_count": len(cached_sources),
+                                        "sources": cached_sources,
+                                    },
+                                    output_payload={
+                                        "cache_key": cache_key,
+                                        "cached": True,
+                                        "sources": cached_sources,
+                                    },
+                                )
+                                active_invocation_id = None
+                                for source in end_result.get("sources", []):
+                                    if source not in sources:
+                                        sources.append(source)
+
+                                cached_content = str(cached.get("content") or "")
+                                cached_thinking = cached.get("thinking")
+                                if cached_content:
+                                    writer(
+                                        {
+                                            "event": "agent_chunk",
+                                            "agent": agent_name,
+                                            "content": cached_content,
+                                        }
+                                    )
+                                    content_parts.append(cached_content)
+                                if isinstance(cached_thinking, str) and cached_thinking:
+                                    writer(
+                                        {
+                                            "event": "agent_thinking",
+                                            "agent": agent_name,
+                                            "content": cached_thinking,
+                                        }
+                                    )
+                                    thinking_parts.append(cached_thinking)
+
+                                content = "".join(content_parts)
+                                content = agent.post_process(content, context)
+                                duration_ms = int((time.time() - start_time) * 1000)
+                                self._record_ark_outcome(
+                                    success=True,
+                                    error=None,
+                                    writer=writer,
+                                )
+                                result = AgentResult(
+                                    agent_name=agent_name,
+                                    content=content,
+                                    thinking="".join(thinking_parts)
+                                    if thinking_parts
+                                    else None,
+                                    sources=sources,
+                                    duration_ms=duration_ms,
+                                )
+                                writer(
+                                    {
+                                        "event": "agent_end",
+                                        "agent": agent_name,
+                                        "status": "completed",
+                                        "duration_ms": duration_ms,
+                                        "attempt": attempt,
+                                        "timestamp": datetime.now().isoformat(),
+                                    }
+                                )
+                                return {"agent_results": [result]}
 
                         with self._acquire_ark_slot() as slot_limit:
                             if slot_limit < len(self.WORKER_AGENTS):
@@ -784,35 +944,65 @@ class MarketInsightGraphEngine(IGraphEngine):
                                     )
                                     thinking_parts.append(event.content)
                                 elif event.type == StreamEventType.SEARCH_START:
-                                    writer(
-                                        {
-                                            "event": "tool_start",
-                                            "tool": "web_search",
-                                            "agent": agent_name,
-                                            "timestamp": datetime.now().isoformat(),
-                                        }
+                                    active_invocation_id = (
+                                        self._tool_registry.begin_invocation(
+                                            writer=writer,
+                                            session_id=session_id,
+                                            tool_name="web_search",
+                                            agent_name=agent_name,
+                                            model_name=str(agent.model),
+                                            input_payload=tool_input_payload,
+                                            context="worker",
+                                            cache_hit=False,
+                                        )
                                     )
                                 elif event.type == StreamEventType.SEARCH_COMPLETE:
                                     meta = event.metadata or {}
-                                    meta_sources = meta.get("sources")
-                                    if isinstance(meta_sources, list):
-                                        for source in meta_sources:
-                                            if isinstance(source, str) and source not in sources:
-                                                sources.append(source)
-                                    writer(
-                                        {
-                                            "event": "tool_end",
-                                            "tool": "web_search",
-                                            "agent": agent_name,
+                                    if not active_invocation_id:
+                                        active_invocation_id = (
+                                            self._tool_registry.begin_invocation(
+                                                writer=writer,
+                                                session_id=session_id,
+                                                tool_name="web_search",
+                                                agent_name=agent_name,
+                                                model_name=str(agent.model),
+                                                input_payload=tool_input_payload,
+                                                context="worker",
+                                                cache_hit=False,
+                                            )
+                                        )
+                                    end_result = self._tool_registry.end_invocation(
+                                        writer=writer,
+                                        invocation_id=active_invocation_id,
+                                        metadata=meta,
+                                        output_payload={
                                             "sources_count": meta.get(
                                                 "sources_count", 0
                                             ),
-                                            "timestamp": datetime.now().isoformat(),
-                                        }
+                                            "sources": meta.get("sources")
+                                            if isinstance(meta.get("sources"), list)
+                                            else [],
+                                        },
                                     )
+                                    active_invocation_id = None
+                                    for source in end_result.get("sources", []):
+                                        if source not in sources:
+                                            sources.append(source)
 
                         content = "".join(content_parts)
                         content = agent.post_process(content, context)
+
+                        if agent.use_websearch and cache_key and content:
+                            self._tool_cache.set(
+                                cache_key,
+                                {
+                                    "content": content,
+                                    "thinking": "".join(thinking_parts)
+                                    if thinking_parts
+                                    else None,
+                                    "sources": copy.deepcopy(sources),
+                                },
+                            )
 
                     else:
                         target_market = state.get("user_profile", {}).get(
@@ -848,6 +1038,15 @@ class MarketInsightGraphEngine(IGraphEngine):
                     return {"agent_results": [result]}
 
                 except Exception as e:
+                    if active_invocation_id:
+                        try:
+                            self._tool_registry.error_invocation(
+                                writer=writer,
+                                invocation_id=active_invocation_id,
+                                error_message=str(e),
+                            )
+                        except Exception:
+                            pass
                     last_error = str(e)
                     self._record_ark_outcome(
                         success=False, error=last_error, writer=writer
@@ -1336,14 +1535,77 @@ class MarketInsightGraphEngine(IGraphEngine):
                 {"role": "user", "content": agent.get_user_prompt(context)},
             ]
 
-        content_parts = []
+        content_parts: list[str] = []
 
         from core.ark_client import StreamEventType
 
-        # 统一由工作流开关控制是否允许联网搜索
-        effective_websearch = bool(getattr(agent, "use_websearch", False)) and bool(
+        session_id = str(state.get("session_id") or "")
+        requested_websearch = bool(getattr(agent, "use_websearch", False)) and bool(
             state.get("enable_websearch", False)
         )
+        effective_websearch = self._tool_registry.should_enable_websearch(
+            session_id=session_id,
+            requested=requested_websearch,
+        )
+
+        prompt_hash = self._build_prompt_hash(messages)
+        debate_round = int(state.get("current_debate_round", 0) or 0)
+        tool_input_payload = self._make_tool_input_payload(
+            prompt_hash=prompt_hash,
+            debate_round=debate_round,
+            enable_websearch=bool(effective_websearch),
+        )
+
+        active_invocation_id: Optional[str] = None
+        search_sources: list[str] = []
+        cache_key: Optional[str] = None
+        if effective_websearch:
+            cache_key = self._build_tool_cache_key(
+                agent_name=str(agent.name),
+                model=str(agent.model),
+                prompt_hash=prompt_hash,
+                debate_round=debate_round,
+                enable_websearch=True,
+            )
+            cached = self._tool_cache.get(cache_key)
+            if isinstance(cached, dict):
+                active_invocation_id = self._tool_registry.begin_invocation(
+                    writer=writer,
+                    session_id=session_id,
+                    tool_name="web_search",
+                    agent_name=str(agent.name),
+                    model_name=str(agent.model),
+                    input_payload=tool_input_payload,
+                    context=event_prefix,
+                    cache_hit=True,
+                )
+                cached_sources = cached.get("sources")
+                if not isinstance(cached_sources, list):
+                    cached_sources = []
+                self._tool_registry.end_invocation(
+                    writer=writer,
+                    invocation_id=active_invocation_id,
+                    metadata={
+                        "sources_count": len(cached_sources),
+                        "sources": cached_sources,
+                    },
+                    output_payload={
+                        "cache_key": cache_key,
+                        "cached": True,
+                        "sources": cached_sources,
+                    },
+                )
+                active_invocation_id = None
+                cached_content = str(cached.get("content") or "")
+                if cached_content and emit_chunks:
+                    writer(
+                        {
+                            "event": f"{event_prefix}_chunk",
+                            "agent": agent.name,
+                            "content": cached_content,
+                        }
+                    )
+                return cached_content
 
         try:
             with self._acquire_ark_slot():
@@ -1365,31 +1627,67 @@ class MarketInsightGraphEngine(IGraphEngine):
                             )
                         content_parts.append(event.content)
                     elif event.type == StreamEventType.SEARCH_START:
-                        writer(
-                            {
-                                "event": "tool_start",
-                                "tool": "web_search",
-                                "agent": agent.name,
-                                "context": event_prefix,
-                                "timestamp": datetime.now().isoformat(),
-                            }
+                        active_invocation_id = self._tool_registry.begin_invocation(
+                            writer=writer,
+                            session_id=session_id,
+                            tool_name="web_search",
+                            agent_name=str(agent.name),
+                            model_name=str(agent.model),
+                            input_payload=tool_input_payload,
+                            context=event_prefix,
+                            cache_hit=False,
                         )
                     elif event.type == StreamEventType.SEARCH_COMPLETE:
                         meta = event.metadata or {}
-                        writer(
-                            {
-                                "event": "tool_end",
-                                "tool": "web_search",
-                                "agent": agent.name,
-                                "context": event_prefix,
+                        if not active_invocation_id:
+                            active_invocation_id = self._tool_registry.begin_invocation(
+                                writer=writer,
+                                session_id=session_id,
+                                tool_name="web_search",
+                                agent_name=str(agent.name),
+                                model_name=str(agent.model),
+                                input_payload=tool_input_payload,
+                                context=event_prefix,
+                                cache_hit=False,
+                            )
+                        end_result = self._tool_registry.end_invocation(
+                            writer=writer,
+                            invocation_id=active_invocation_id,
+                            metadata=meta,
+                            output_payload={
                                 "sources_count": meta.get("sources_count", 0),
-                                "timestamp": datetime.now().isoformat(),
-                            }
+                                "sources": meta.get("sources")
+                                if isinstance(meta.get("sources"), list)
+                                else [],
+                            },
                         )
+                        for source in end_result.get("sources", []):
+                            if source not in search_sources:
+                                search_sources.append(source)
+                        active_invocation_id = None
 
             self._record_ark_outcome(success=True, error=None, writer=writer)
-            return "".join(content_parts)
+            content = "".join(content_parts)
+            if effective_websearch and cache_key and content:
+                self._tool_cache.set(
+                    cache_key,
+                    {
+                        "content": content,
+                        "thinking": None,
+                        "sources": search_sources,
+                    },
+                )
+            return content
         except Exception as e:
+            if active_invocation_id:
+                try:
+                    self._tool_registry.error_invocation(
+                        writer=writer,
+                        invocation_id=active_invocation_id,
+                        error_message=str(e),
+                    )
+                except Exception:
+                    pass
             self._record_ark_outcome(success=False, error=str(e), writer=writer)
             raise
 

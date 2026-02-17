@@ -2,9 +2,9 @@
 Phase 3 回放脚本
 
 用途：
-- 批量回放样本请求（调用 /generate + /status）
+- 批量回放样本请求（优先走 /stream，必要时可切到 /generate）
 - 校验 Evidence Pack / 轻量记忆快照是否可用
-- 产出 jsonl 结果，便于比赛前稳定性复核
+- 输出 jsonl 结果，便于比赛前稳定性复核
 """
 
 from __future__ import annotations
@@ -25,7 +25,8 @@ def _now_iso() -> str:
 
 
 def _load_payload(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    # 兼容带 BOM 的 UTF-8 样本
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(data, dict):
         raise ValueError(f"样本不是对象结构: {path}")
     return data
@@ -59,19 +60,90 @@ def _extract_status_snapshot(status_payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _extract_event_snapshot(orchestrator_end_event: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(orchestrator_end_event, dict):
+        return {
+            "event_has_evidence_pack": False,
+            "event_has_memory_snapshot": False,
+            "event_claims_count": 0,
+            "event_traceability_count": 0,
+        }
+    evidence_pack = orchestrator_end_event.get("evidence_pack")
+    memory_snapshot = orchestrator_end_event.get("memory_snapshot")
+    claims = evidence_pack.get("claims") if isinstance(evidence_pack, dict) else None
+    traceability = (
+        evidence_pack.get("traceability") if isinstance(evidence_pack, dict) else None
+    )
+    return {
+        "event_has_evidence_pack": isinstance(evidence_pack, dict),
+        "event_has_memory_snapshot": isinstance(memory_snapshot, dict),
+        "event_claims_count": len(claims) if isinstance(claims, list) else 0,
+        "event_traceability_count": len(traceability)
+        if isinstance(traceability, list)
+        else 0,
+    }
+
+
+def _run_stream_once(
+    *,
+    client: httpx.Client,
+    stream_url: str,
+    payload: dict[str, Any],
+) -> tuple[int | None, int, dict[str, Any] | None, str | None]:
+    event_count = 0
+    orchestrator_end_event: dict[str, Any] | None = None
+    err: str | None = None
+    http_code: int | None = None
+    try:
+        with client.stream("POST", stream_url, json=payload, timeout=None) as resp:
+            http_code = resp.status_code
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                s = line.decode("utf-8") if isinstance(line, bytes) else line
+                if not s.startswith("data: "):
+                    continue
+                body = s[6:]
+                if body == "[DONE]":
+                    break
+                try:
+                    event = json.loads(body)
+                except Exception:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                event_count += 1
+                if event.get("event") == "orchestrator_end":
+                    orchestrator_end_event = event
+                    break
+                if event.get("event") == "error":
+                    err = str(event.get("error") or "stream error")
+                    break
+    except Exception as e:
+        err = str(e)
+    return http_code, event_count, orchestrator_end_event, err
+
+
 def run_one_sample(
     *,
     client: httpx.Client,
     api_base: str,
     sample_path: Path,
     timeout_sec: float,
+    status_poll_sec: float,
+    force_debate_rounds: int | None,
+    use_stream: bool,
 ) -> dict[str, Any]:
     payload = _load_payload(sample_path)
     session_id = str(payload.get("session_id") or uuid.uuid4())
     payload["session_id"] = session_id
+    if force_debate_rounds is not None:
+        payload["debate_rounds"] = force_debate_rounds
 
     started = time.time()
     generate_url = f"{api_base}/api/v2/market-insight/generate"
+    stream_url = f"{api_base}/api/v2/market-insight/stream"
     status_url = f"{api_base}/api/v2/market-insight/status/{session_id}"
 
     record: dict[str, Any] = {
@@ -79,31 +151,84 @@ def run_one_sample(
         "session_id": session_id,
         "started_at": _now_iso(),
         "ok": False,
+        "entrypoint": "stream" if use_stream else "generate",
         "generate_http": None,
         "status_http": None,
+        "stream_event_count": 0,
         "error": None,
     }
 
-    try:
-        gen_resp = client.post(generate_url, json=payload, timeout=timeout_sec)
-        record["generate_http"] = gen_resp.status_code
-        gen_resp.raise_for_status()
-
-        status_resp = client.get(status_url, timeout=timeout_sec)
-        record["status_http"] = status_resp.status_code
-        status_resp.raise_for_status()
-        status_payload = status_resp.json()
-
-        summary = _extract_status_snapshot(status_payload)
-        record.update(summary)
-        record["ok"] = bool(
-            summary["has_evidence_pack"]
-            and summary["has_memory_snapshot"]
-            and summary["claims_count"] >= 1
-            and summary["traceability_count"] >= 1
+    # 1) 触发执行
+    orchestrator_end_event: dict[str, Any] | None = None
+    if use_stream:
+        http_code, event_count, end_event, stream_err = _run_stream_once(
+            client=client, stream_url=stream_url, payload=payload
         )
-    except Exception as e:
-        record["error"] = str(e)
+        record["generate_http"] = http_code
+        record["stream_event_count"] = event_count
+        if isinstance(end_event, dict):
+            orchestrator_end_event = end_event
+        if stream_err:
+            record["error"] = stream_err
+    else:
+        try:
+            gen_resp = client.post(generate_url, json=payload, timeout=timeout_sec)
+            record["generate_http"] = gen_resp.status_code
+            gen_resp.raise_for_status()
+        except Exception as e:
+            record["error"] = str(e)
+
+    # 2) 查询状态（允许异步落库延迟）
+    final_status_payload: dict[str, Any] | None = None
+    poll_deadline = time.time() + max(15.0, status_poll_sec)
+    while time.time() < poll_deadline:
+        try:
+            status_resp = client.get(status_url, timeout=20.0)
+            record["status_http"] = status_resp.status_code
+            if status_resp.status_code == 200:
+                payload_obj = status_resp.json()
+                if isinstance(payload_obj, dict):
+                    final_status_payload = payload_obj
+                    session = payload_obj.get("session")
+                    if isinstance(session, dict):
+                        if isinstance(session.get("evidence_pack"), dict) and isinstance(
+                            session.get("memory_snapshot"), dict
+                        ):
+                            break
+            time.sleep(3.0)
+        except Exception:
+            time.sleep(3.0)
+
+    if isinstance(final_status_payload, dict):
+        record.update(_extract_status_snapshot(final_status_payload))
+    else:
+        record.update(
+            {
+                "session_status": None,
+                "phase": None,
+                "has_evidence_pack": False,
+                "has_memory_snapshot": False,
+                "claims_count": 0,
+                "traceability_count": 0,
+            }
+        )
+
+    record.update(_extract_event_snapshot(orchestrator_end_event))
+
+    # 3) 判定：优先 status；若 status 仍未回写，允许使用 orchestrator_end 兜底
+    status_ok = bool(
+        record["has_evidence_pack"]
+        and record["has_memory_snapshot"]
+        and record["claims_count"] >= 1
+        and record["traceability_count"] >= 1
+    )
+    event_ok = bool(
+        record["event_has_evidence_pack"]
+        and record["event_has_memory_snapshot"]
+        and record["event_claims_count"] >= 1
+        and record["event_traceability_count"] >= 1
+    )
+    record["ok"] = status_ok or event_ok
 
     record["duration_ms"] = int((time.time() - started) * 1000)
     record["finished_at"] = _now_iso()
@@ -133,8 +258,26 @@ def main() -> None:
     parser.add_argument(
         "--timeout-sec",
         type=float,
-        default=180.0,
-        help="单个请求超时时间（秒）",
+        default=600.0,
+        help="触发执行的超时秒数（仅 generate 模式使用）",
+    )
+    parser.add_argument(
+        "--status-poll-sec",
+        type=float,
+        default=120.0,
+        help="状态轮询总时长（秒）",
+    )
+    parser.add_argument(
+        "--force-debate-rounds",
+        type=int,
+        default=0,
+        help="强制覆盖样本 debate_rounds（默认 0，加速验收）",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["stream", "generate"],
+        default="stream",
+        help="回放入口，默认 stream（推荐）",
     )
     args = parser.parse_args()
 
@@ -149,19 +292,25 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, Any]] = []
 
-    with httpx.Client() as client:
+    # trust_env=False：避免读取系统代理导致本地回环请求被代理劫持
+    with httpx.Client(trust_env=False) as client:
         for sample_path in sample_files:
             record = run_one_sample(
                 client=client,
                 api_base=args.api_base.rstrip("/"),
                 sample_path=sample_path,
                 timeout_sec=max(10.0, args.timeout_sec),
+                status_poll_sec=max(15.0, args.status_poll_sec),
+                force_debate_rounds=args.force_debate_rounds,
+                use_stream=args.mode == "stream",
             )
             records.append(record)
             print(
                 f"[{record['sample']}] ok={record['ok']} "
+                f"entry={record.get('entrypoint')} "
                 f"generate={record.get('generate_http')} "
                 f"status={record.get('status_http')} "
+                f"phase={record.get('phase')} "
                 f"duration_ms={record.get('duration_ms')}"
             )
 

@@ -16,7 +16,7 @@
 
 /**
  * SSE 事件类型
- * @typedef {'orchestrator_start' | 'orchestrator_end' | 'agent_start' | 'agent_thinking' | 'agent_chunk' | 'agent_end' | 'agent_error' | 'tool_start' | 'tool_end' | 'retry' | 'debate_round_start' | 'debate_round_end' | 'agent_challenge' | 'agent_challenge_end' | 'agent_respond' | 'agent_respond_end' | 'agent_followup' | 'agent_followup_end' | 'adaptive_concurrency' | 'consensus_reached' | 'error'} SSEEventType
+ * @typedef {'orchestrator_start' | 'orchestrator_end' | 'agent_start' | 'agent_thinking' | 'agent_chunk' | 'agent_end' | 'agent_error' | 'tool_start' | 'tool_end' | 'tool_error' | 'guardrail_triggered' | 'retry' | 'debate_round_start' | 'debate_round_end' | 'agent_challenge' | 'agent_challenge_end' | 'agent_respond' | 'agent_respond_end' | 'agent_followup' | 'agent_followup_end' | 'adaptive_concurrency' | 'consensus_reached' | 'error'} SSEEventType
  */
 
 /**
@@ -55,6 +55,26 @@
  */
 
 /**
+ * 工具指标（单维度）
+ * @typedef {Object} ToolMetricRow
+ * @property {number} total_calls
+ * @property {number} error_count
+ * @property {number} error_rate
+ * @property {number} avg_duration_ms
+ * @property {number} total_estimated_cost_usd
+ * @property {number} cache_hit_count
+ * @property {number} cache_hit_rate
+ * @property {string} [cost_mode]
+ */
+
+/**
+ * 工具指标集合
+ * @typedef {Object} ToolMetrics
+ * @property {ToolMetricRow} session
+ * @property {Object<string, ToolMetricRow>} by_agent
+ */
+
+/**
  * 工作流状态
  * @typedef {Object} WorkflowState
  * @property {string | null} sessionId - 会话 ID
@@ -71,6 +91,7 @@
  * @property {boolean} enableWebsearch - 是否启用 WebSearch
  * @property {Object[]} toolEvents - 工具调用事件
  * @property {Object[]} retryEvents - 重试事件
+ * @property {ToolMetrics | null} toolMetrics - 工具层聚合指标
  */
 
 // Worker Agent 名称常量

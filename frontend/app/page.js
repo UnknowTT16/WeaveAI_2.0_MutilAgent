@@ -12,6 +12,8 @@ import {
   MessageSquare, 
   Activity, 
   Sparkles,
+  BarChart3,
+  ShieldAlert,
   Search,
   Globe,
   ArrowRight,
@@ -255,12 +257,19 @@ export default function Home() {
   const [debateRounds, setDebateRounds] = useState(2);
 
   const { userProfile, isGenerating, synthesizedReport, reportHtmlUrl, error } = state;
+  const toolMetrics = state.toolMetrics;
 
   const agentEntries = useMemo(() => Object.entries(state.agentResults || {}), [state.agentResults]);
   const sortedDebates = useMemo(() => {
     const debates = Array.isArray(state.debateExchanges) ? state.debateExchanges : [];
     return [...debates].sort((a, b) => (a.roundNumber || 0) - (b.roundNumber || 0));
   }, [state.debateExchanges]);
+  const agentToolMetrics = useMemo(() => {
+    const rows = toolMetrics?.by_agent && typeof toolMetrics.by_agent === 'object'
+      ? Object.entries(toolMetrics.by_agent)
+      : [];
+    return rows.sort((a, b) => (b[1]?.total_calls || 0) - (a[1]?.total_calls || 0));
+  }, [toolMetrics]);
 
   const resolvedReportHtmlUrl = useMemo(() => {
     if (!reportHtmlUrl) return '';
@@ -386,7 +395,77 @@ export default function Home() {
             )}
           </section>
 
-          {/* Bento Section 3: Final Synthesis */}
+          {/* Bento Section 3: Tool Metrics */}
+          <section>
+            <div className="flex items-center gap-2 mb-8">
+              <BarChart3 size={20} className="text-gemini-blue" />
+              <h2 className="text-2xl font-bold tracking-tight">成本与稳定性</h2>
+              <div className="h-px flex-grow bg-border ml-4" />
+            </div>
+
+            {toolMetrics?.session ? (
+              <div className="space-y-6">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                  <div className="glass rounded-2xl border border-border p-4">
+                    <div className="text-xs text-muted-foreground">总工具调用</div>
+                    <div className="text-2xl font-bold tracking-tight">{toolMetrics.session.total_calls || 0}</div>
+                  </div>
+                  <div className="glass rounded-2xl border border-border p-4">
+                    <div className="text-xs text-muted-foreground">错误率</div>
+                    <div className="text-2xl font-bold tracking-tight">{((toolMetrics.session.error_rate || 0) * 100).toFixed(1)}%</div>
+                  </div>
+                  <div className="glass rounded-2xl border border-border p-4">
+                    <div className="text-xs text-muted-foreground">平均时延</div>
+                    <div className="text-2xl font-bold tracking-tight">{Math.round(toolMetrics.session.avg_duration_ms || 0)}ms</div>
+                  </div>
+                  <div className="glass rounded-2xl border border-border p-4">
+                    <div className="text-xs text-muted-foreground">估算成本</div>
+                    <div className="text-2xl font-bold tracking-tight">${(toolMetrics.session.total_estimated_cost_usd || 0).toFixed(4)}</div>
+                  </div>
+                  <div className="glass rounded-2xl border border-border p-4">
+                    <div className="text-xs text-muted-foreground">缓存命中率</div>
+                    <div className="text-2xl font-bold tracking-tight">{((toolMetrics.session.cache_hit_rate || 0) * 100).toFixed(1)}%</div>
+                  </div>
+                </div>
+
+                <div className="glass rounded-2xl border border-border overflow-hidden">
+                  <div className="flex items-center gap-2 px-4 py-3 border-b border-border text-sm font-bold">
+                    <ShieldAlert size={14} className="text-gemini-red" /> Agent 维度
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="text-xs text-muted-foreground uppercase tracking-wider">
+                        <tr>
+                          <th className="text-left px-4 py-3">Agent</th>
+                          <th className="text-right px-4 py-3">调用</th>
+                          <th className="text-right px-4 py-3">错误率</th>
+                          <th className="text-right px-4 py-3">平均时延</th>
+                          <th className="text-right px-4 py-3">估算成本</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {agentToolMetrics.map(([agentName, row]) => (
+                          <tr key={agentName} className="border-t border-border/60">
+                            <td className="px-4 py-3 font-medium">{displayAgentName(agentName)}</td>
+                            <td className="px-4 py-3 text-right">{row?.total_calls || 0}</td>
+                            <td className="px-4 py-3 text-right">{(((row?.error_rate || 0) * 100)).toFixed(1)}%</td>
+                            <td className="px-4 py-3 text-right">{Math.round(row?.avg_duration_ms || 0)}ms</td>
+                            <td className="px-4 py-3 text-right">${(row?.total_estimated_cost_usd || 0).toFixed(4)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="py-10 text-center glass rounded-3xl border border-dashed border-border text-muted-foreground italic">
+                暂无工具层指标，生成一次任务后将自动展示。
+              </div>
+            )}
+          </section>
+
+          {/* Bento Section 4: Final Synthesis */}
           <section className="pb-20">
             <div className="flex items-center gap-2 mb-8">
               <Sparkles size={20} className="text-gemini-red" />

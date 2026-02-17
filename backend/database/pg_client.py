@@ -19,6 +19,8 @@ import psycopg2
 from psycopg2.extras import Json
 from dotenv import load_dotenv
 
+from tools.metrics import aggregate_tool_metrics
+
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +245,9 @@ class PgClient:
         for k, v in fields.items():
             if k not in allowed:
                 continue
-            if k in {"profile", "evidence_pack", "memory_snapshot"} and isinstance(v, dict):
+            if k in {"profile", "evidence_pack", "memory_snapshot"} and isinstance(
+                v, dict
+            ):
                 v = Json(v)
             sets.append(f"{k} = %s")
             values.append(v)
@@ -330,6 +334,46 @@ class PgClient:
         """
         self.execute(sql, (session_id, event_type, agent_name, Json(payload)))
 
+    def insert_tool_invocation(self, fields: dict[str, Any]) -> None:
+        """写入工具调用审计记录。"""
+        allowed = {
+            "session_id",
+            "invocation_id",
+            "agent_name",
+            "tool_name",
+            "status",
+            "duration_ms",
+            "input",
+            "output",
+            "error_message",
+            "context",
+            "model_name",
+            "cache_hit",
+            "estimated_input_tokens",
+            "estimated_output_tokens",
+            "estimated_cost_usd",
+            "started_at",
+            "finished_at",
+        }
+        cols: list[str] = []
+        vals: list[Any] = []
+        for k, v in fields.items():
+            if k not in allowed:
+                continue
+            if k in {"input", "output"} and isinstance(v, dict):
+                v = Json(v)
+            cols.append(k)
+            vals.append(v)
+
+        if not cols:
+            return
+
+        sql = f"""
+        INSERT INTO public.tool_invocations ({", ".join(cols)})
+        VALUES ({", ".join(["%s"] * len(cols))});
+        """
+        self.execute(sql, tuple(vals))
+
     # ============================================
     # Phase 1 读侧接口（status / 重连）
     # ============================================
@@ -405,6 +449,45 @@ class PgClient:
             rows = cur.fetchall()
             cols = [d.name for d in cur.description]
             return [dict(zip(cols, r)) for r in rows]
+
+    def list_tool_invocations(self, session_id: str) -> list[dict[str, Any]]:
+        """读取工具调用记录，兼容 Phase 4 迁移前结构。"""
+        sql_v4 = """
+        SELECT id, session_id, invocation_id, agent_name, tool_name, status, duration_ms,
+               input, output, error_message, context, model_name, cache_hit,
+               estimated_input_tokens, estimated_output_tokens, estimated_cost_usd,
+               started_at, finished_at, created_at
+        FROM public.tool_invocations
+        WHERE session_id = %s
+        ORDER BY created_at ASC, id ASC
+        """
+        sql_legacy = """
+        SELECT id, session_id, NULL::uuid AS invocation_id, agent_name, tool_name, status,
+               duration_ms, input, output, error_message, NULL::text AS context,
+               NULL::text AS model_name, FALSE AS cache_hit,
+               NULL::int AS estimated_input_tokens,
+               NULL::int AS estimated_output_tokens,
+               NULL::numeric AS estimated_cost_usd,
+               NULL::timestamptz AS started_at,
+               NULL::timestamptz AS finished_at,
+               created_at
+        FROM public.tool_invocations
+        WHERE session_id = %s
+        ORDER BY created_at ASC, id ASC
+        """
+
+        with self.conn().cursor() as cur:
+            try:
+                cur.execute(sql_v4, (session_id,))
+            except Exception:
+                cur.execute(sql_legacy, (session_id,))
+            rows = cur.fetchall()
+            cols = [d.name for d in cur.description]
+            return [dict(zip(cols, r)) for r in rows]
+
+    def aggregate_tool_metrics(self, session_id: str) -> dict[str, Any]:
+        invocations = self.list_tool_invocations(session_id)
+        return aggregate_tool_metrics(invocations)
 
 
 def pg_is_configured() -> bool:

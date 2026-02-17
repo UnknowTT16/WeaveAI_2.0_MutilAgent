@@ -39,10 +39,10 @@ AGENT_DEBATE_CHALLENGER = "debate_challenger"
 # Agent -> Model 映射 (基于用户确认的设计)
 AGENT_MODEL_MAPPING: dict[str, str] = {
     # Worker Agents
-    AGENT_TREND_SCOUT: "doubao-seed-2-0-pro-260215",  # 2.0旗舰 + 强联网 + 发散联想
-    AGENT_COMPETITOR_ANALYST: "deepseek-v3-2-251201",  # 逻辑推理强 + 结构化分析
-    AGENT_REGULATION_CHECKER: "kimi-k2-thinking-251104",  # 长文档阅读 + Thinking 模式
-    AGENT_SOCIAL_SENTINEL: "doubao-seed-2-0-pro-260215",  # 2.0旗舰 + 中文语感 + 情感理解
+    AGENT_TREND_SCOUT: "doubao-seed-1-8-251228",  # 成本控制：统一使用豆包 1.8
+    AGENT_COMPETITOR_ANALYST: "doubao-seed-1-8-251228",  # 成本控制：统一使用豆包 1.8
+    AGENT_REGULATION_CHECKER: "doubao-seed-1-8-251228",  # 成本控制：统一使用豆包 1.8
+    AGENT_SOCIAL_SENTINEL: "doubao-seed-1-8-251228",  # 成本控制：统一使用豆包 1.8
     # Synthesizer
     AGENT_SYNTHESIZER: "kimi-k2-thinking-251104",  # 超长上下文 + 不丢细节
     # Debate Agent
@@ -114,6 +114,7 @@ class Settings(BaseSettings):
     # 备选模型列表 (都支持 web_search)
     supported_models: list[str] = [
         "doubao-seed-2-0-pro-260215",
+        "doubao-seed-1-8-251228",
         "doubao-seed-1-6-250615",
         "deepseek-v3-2-251201",
         "deepseek-v3-1-terminus",
@@ -148,6 +149,34 @@ class Settings(BaseSettings):
 
     # 工具限流配置
     tool_rate_limit_qps: int = Field(default=5, alias="TOOL_RATE_LIMIT_QPS")
+
+    # 工具护栏配置
+    tool_guardrail_max_estimated_cost_usd: float = Field(
+        default=0.5,
+        alias="TOOL_GUARDRAIL_MAX_ESTIMATED_COST_USD",
+    )
+    tool_guardrail_max_error_rate: float = Field(
+        default=0.6,
+        alias="TOOL_GUARDRAIL_MAX_ERROR_RATE",
+    )
+    tool_guardrail_min_calls_for_error_rate: int = Field(
+        default=3,
+        alias="TOOL_GUARDRAIL_MIN_CALLS_FOR_ERROR_RATE",
+    )
+    tool_guardrail_action: str = Field(
+        default="disable_websearch",
+        alias="TOOL_GUARDRAIL_ACTION",
+    )
+
+    # Prompt 模板版本
+    prompt_template_version: str = Field(
+        default="phase4.v1",
+        alias="PROMPT_TEMPLATE_VERSION",
+    )
+
+    # 缓存配置
+    tool_cache_ttl_seconds: int = Field(default=300, alias="TOOL_CACHE_TTL_SECONDS")
+    tool_cache_max_size: int = Field(default=128, alias="TOOL_CACHE_MAX_SIZE")
 
     # web_search 配置
     web_search_limit: int = Field(default=15, alias="WEB_SEARCH_LIMIT")

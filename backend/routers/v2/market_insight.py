@@ -351,10 +351,16 @@ async def get_workflow_status(session_id: str):
         agent_results = pg.list_agent_results(session_id)
         debate_exchanges = pg.list_debate_exchanges(session_id)
         workflow_events = pg.list_workflow_events(session_id, limit=200)
+        tool_invocations = pg.list_tool_invocations(session_id)
+        tool_metrics = pg.aggregate_tool_metrics(session_id)
 
         # Phase 3：对历史会话按需回补 Evidence Pack / 记忆快照。
         update_fields: dict[str, Any] = {}
-        profile = session_row.get("profile") if isinstance(session_row.get("profile"), dict) else {}
+        profile = (
+            session_row.get("profile")
+            if isinstance(session_row.get("profile"), dict)
+            else {}
+        )
         synthesized_report = str(session_row.get("synthesized_report") or "")
         if synthesized_report:
             if not isinstance(session_row.get("evidence_pack"), dict):
@@ -398,6 +404,8 @@ async def get_workflow_status(session_id: str):
             "agent_results": agent_results,
             "debate_exchanges": debate_exchanges,
             "workflow_events": workflow_events,
+            "tool_invocations": tool_invocations,
+            "tool_metrics": tool_metrics,
         }
     finally:
         try:

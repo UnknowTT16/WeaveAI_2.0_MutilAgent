@@ -32,6 +32,12 @@ class MarketInsightResponse(BaseModel):
     memory_snapshot: Optional[dict[str, Any]] = Field(
         default=None, description="Phase 3 轻量记忆快照"
     )
+    tool_invocations: list[dict[str, Any]] = Field(
+        default_factory=list, description="工具调用记录"
+    )
+    tool_metrics: Optional[dict[str, Any]] = Field(
+        default=None, description="工具层指标（session + by_agent）"
+    )
     agent_results: list[dict[str, Any]] = Field(
         default_factory=list, description="各 Agent 执行结果"
     )
