@@ -35,6 +35,8 @@ export function WorkflowProvider({ children }) {
     setPhase: (phase) => dispatch(actions.setPhase(phase)),
     setError: (error) => dispatch(actions.setError(error)),
     clearError: () => dispatch(actions.clearError()),
+    setRecoveryState: (payload) => dispatch(actions.setRecoveryState(payload)),
+    clearRecoveryState: () => dispatch(actions.clearRecoveryState()),
     
     // UI 状态
     toggleWebsearch: () => dispatch(actions.toggleWebsearch()),

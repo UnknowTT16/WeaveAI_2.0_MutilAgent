@@ -16,11 +16,9 @@ export default function ThemeToggle() {
   return (
     <button
       onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-      className="relative p-2 rounded-xl bg-gray-100 dark:bg-white/5 border border-black/5 dark:border-white/10 hover:scale-105 active:scale-95 transition-all group overflow-hidden"
-      aria-label="Toggle Theme"
+      className="relative rounded-xl border border-border bg-card p-2 text-muted-foreground transition-transform duration-200 hover:scale-105 hover:text-foreground active:scale-95"
+      aria-label={theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}
     >
-      <div className="absolute inset-0 bg-gradient-to-tr from-gemini-blue/10 to-gemini-purple/10 opacity-0 group-hover:opacity-100 transition-opacity" />
-      
       <AnimatePresence mode="wait" initial={false}>
         {theme === 'dark' ? (
           <motion.div
@@ -30,7 +28,7 @@ export default function ThemeToggle() {
             exit={{ y: -20, opacity: 0, rotate: -45 }}
             transition={{ type: 'spring', stiffness: 200, damping: 15 }}
           >
-            <Moon size={18} className="text-blue-400" />
+            <Moon size={18} className="text-gemini-blue" aria-hidden="true" />
           </motion.div>
         ) : (
           <motion.div
@@ -40,7 +38,7 @@ export default function ThemeToggle() {
             exit={{ y: -20, opacity: 0, rotate: -45 }}
             transition={{ type: 'spring', stiffness: 200, damping: 15 }}
           >
-            <Sun size={18} className="text-amber-500" />
+            <Sun size={18} className="text-amber-500" aria-hidden="true" />
           </motion.div>
         )}
       </AnimatePresence>

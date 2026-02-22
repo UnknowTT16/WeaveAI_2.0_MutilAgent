@@ -1,159 +1,163 @@
-// frontend/app/components/ProfileForm.js
 'use client';
 
-import { useState } from 'react';
-import { motion } from 'framer-motion';
-import { 
-  Globe2, 
-  ShoppingBag, 
-  UserCircle2, 
-  DollarSign, 
-  Sparkles,
-  ArrowRight
-} from 'lucide-react';
-import { clsx } from 'clsx';
-import { twMerge } from 'tailwind-merge';
+import { useMemo, useState } from 'react';
 
-function cn(...inputs) {
-  return twMerge(clsx(inputs));
+export const DEFAULT_PROFILE_DRAFT = {
+  target_market: '德国',
+  supply_chain: '消费电子',
+  seller_type: '品牌方',
+  min_price: 30,
+  max_price: 90,
+};
+
+export function normalizeProfileDraft(raw = {}) {
+  const next = {
+    ...DEFAULT_PROFILE_DRAFT,
+    ...(raw && typeof raw === 'object' ? raw : {}),
+  };
+  next.min_price = Number.parseInt(String(next.min_price), 10) || 0;
+  next.max_price = Number.parseInt(String(next.max_price), 10) || 0;
+  return next;
 }
 
-export default function ProfileForm({ onFormSubmit, isLoading }) {
-  const [profileData, setProfileData] = useState({
-    target_market: 'Germany',
-    supply_chain: 'Consumer Electronics',
-    seller_type: '品牌方',
-    min_price: 30,
-    max_price: 90,
-  });
+export default function ProfileForm({
+  value,
+  onChange,
+  onFormSubmit,
+  isLoading,
+  submitLabel = '开始分析',
+  showTitle = true,
+}) {
+  const controlled = Boolean(value) && typeof onChange === 'function';
+  const [internalValue, setInternalValue] = useState(DEFAULT_PROFILE_DRAFT);
 
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    setProfileData(prevData => ({ ...prevData, [name]: value }));
+  const profileData = useMemo(
+    () => normalizeProfileDraft(controlled ? value : internalValue),
+    [controlled, value, internalValue]
+  );
+
+  const updateValue = (next) => {
+    if (controlled) {
+      onChange(next);
+      return;
+    }
+    setInternalValue(next);
+  };
+
+  const handleChange = (event) => {
+    const { name, value: fieldValue } = event.target;
+    updateValue({
+      ...profileData,
+      [name]: name.includes('price') ? Number.parseInt(fieldValue || '0', 10) : fieldValue,
+    });
   };
 
   const handleSubmit = (event) => {
     event.preventDefault();
-    onFormSubmit({
-      ...profileData,
-      min_price: parseInt(profileData.min_price) || 0,
-      max_price: parseInt(profileData.max_price) || 0,
-    });
+    if (typeof onFormSubmit !== 'function') return;
+    onFormSubmit(normalizeProfileDraft(profileData));
   };
 
-  const inputClasses = "w-full bg-accent/50 border-border rounded-2xl p-4 text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-gemini-blue/20 focus:border-gemini-blue outline-none transition-all";
-  const labelClasses = "flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2 px-1";
-
   return (
-    <div className="w-full max-w-xl mx-auto">
-      <div className="text-center mb-8">
-        <motion.div
-          initial={{ scale: 0.5, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-gradient-to-tr from-gemini-blue to-gemini-purple text-white mb-4"
-        >
-          <Sparkles size={24} />
-        </motion.div>
-        <h3 className="text-2xl font-bold tracking-tight">配置战略分析方案</h3>
-        <p className="text-muted-foreground mt-2">填写以下信息以启动多 Agent 深度调研</p>
-      </div>
+    <div className="w-full rounded-3xl border border-border bg-card/90 p-5 shadow-sm md:p-7">
+      {showTitle && (
+        <div className="mb-5">
+          <h2 className="section-title">告诉我们你的目标，我们帮你开始分析</h2>
+          <p className="mt-2 text-sm text-muted-foreground">填写这 5 项信息即可开始。后续你可以在偏好页调整高级参数。</p>
+        </div>
+      )}
 
-      <form onSubmit={handleSubmit} className="space-y-6">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* Target Market */}
-          <div>
-            <label className={labelClasses}><Globe2 size={14} /> 目标市场</label>
-            <input 
-              type="text" 
-              name="target_market" 
-              placeholder="例如：Germany, Japan"
-              value={profileData.target_market} 
-              onChange={handleChange} 
-              required 
-              className={inputClasses}
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="space-y-1.5">
+            <label htmlFor="target_market" className="text-xs font-medium text-muted-foreground">目标市场</label>
+            <input
+              id="target_market"
+              name="target_market"
+              type="text"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="例如：德国、美国、日本…"
+              value={profileData.target_market}
+              onChange={handleChange}
+              required
+              className="w-full rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
             />
           </div>
 
-          {/* Supply Chain */}
-          <div>
-            <label className={labelClasses}><ShoppingBag size={14} /> 核心品类</label>
-            <input 
-              type="text" 
-              name="supply_chain" 
-              placeholder="例如：Consumer Electronics"
-              value={profileData.supply_chain} 
-              onChange={handleChange} 
-              required 
-              className={inputClasses}
+          <div className="space-y-1.5">
+            <label htmlFor="supply_chain" className="text-xs font-medium text-muted-foreground">核心品类</label>
+            <input
+              id="supply_chain"
+              name="supply_chain"
+              type="text"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="例如：消费电子、家居收纳…"
+              value={profileData.supply_chain}
+              onChange={handleChange}
+              required
+              className="w-full rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
             />
           </div>
         </div>
 
-        {/* Seller Type */}
-        <div>
-          <label className={labelClasses}><UserCircle2 size={14} /> 卖家身份</label>
-          <select 
-            name="seller_type" 
-            value={profileData.seller_type} 
-            onChange={handleChange} 
-            className={cn(inputClasses, "appearance-none cursor-pointer")}
+        <div className="space-y-1.5">
+          <label htmlFor="seller_type" className="text-xs font-medium text-muted-foreground">卖家类型</label>
+          <select
+            id="seller_type"
+            name="seller_type"
+            value={profileData.seller_type}
+            onChange={handleChange}
+            className="w-full rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
           >
-            <option>品牌方</option>
-            <option>工厂转型</option>
-            <option>贸易商</option>
-            <option>个人卖家</option>
+            <option value="品牌方">品牌方</option>
+            <option value="工厂转型">工厂转型</option>
+            <option value="贸易商">贸易商</option>
+            <option value="个人卖家">个人卖家</option>
           </select>
         </div>
 
-        {/* Price Range */}
-        <div className="bg-accent/30 p-6 rounded-[2rem] border border-border/50">
-           <label className={labelClasses}><DollarSign size={14} /> 目标售价区间 (USD)</label>
-           <div className="flex items-center gap-4">
-              <div className="relative flex-grow">
-                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
-                <input 
-                  type="number" 
-                  name="min_price" 
-                  value={profileData.min_price} 
-                  onChange={handleChange} 
-                  required 
-                  className={cn(inputClasses, "pl-8")}
-                />
-              </div>
-              <div className="text-muted-foreground">至</div>
-              <div className="relative flex-grow">
-                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
-                <input 
-                  type="number" 
-                  name="max_price" 
-                  value={profileData.max_price} 
-                  onChange={handleChange} 
-                  required 
-                  className={cn(inputClasses, "pl-8")}
-                />
-              </div>
-           </div>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="space-y-1.5">
+            <label htmlFor="min_price" className="text-xs font-medium text-muted-foreground">最低售价（USD）</label>
+            <input
+              id="min_price"
+              name="min_price"
+              type="number"
+              min="0"
+              inputMode="numeric"
+              autoComplete="off"
+              value={profileData.min_price}
+              onChange={handleChange}
+              required
+              className="w-full rounded-xl border border-border bg-background px-3 py-2.5 text-sm numeric"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="max_price" className="text-xs font-medium text-muted-foreground">最高售价（USD）</label>
+            <input
+              id="max_price"
+              name="max_price"
+              type="number"
+              min="0"
+              inputMode="numeric"
+              autoComplete="off"
+              value={profileData.max_price}
+              onChange={handleChange}
+              required
+              className="w-full rounded-xl border border-border bg-background px-3 py-2.5 text-sm numeric"
+            />
+          </div>
         </div>
 
-        <motion.button 
-          whileHover={{ scale: 1.02 }}
-          whileTap={{ scale: 0.98 }}
-          type="submit" 
-          disabled={isLoading} 
-          className="w-full flex items-center justify-center gap-3 py-5 px-4 rounded-2xl bg-foreground text-background font-bold text-lg transition-all disabled:opacity-50 shadow-xl shadow-foreground/5 hover:shadow-foreground/10"
+        <button
+          type="submit"
+          disabled={isLoading}
+          className="inline-flex h-11 items-center justify-center rounded-xl bg-foreground px-5 text-sm font-semibold text-background transition-transform duration-200 hover:scale-[1.01] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {isLoading ? (
-            <div className="flex items-center gap-2">
-              <div className="w-5 h-5 border-2 border-background/30 border-t-background rounded-full animate-spin" />
-              <span>正在初始化...</span>
-            </div>
-          ) : (
-            <>
-              <span>进入编排中心</span>
-              <ArrowRight size={20} />
-            </>
-          )}
-        </motion.button>
+          {isLoading ? '分析启动中…' : submitLabel}
+        </button>
       </form>
     </div>
   );

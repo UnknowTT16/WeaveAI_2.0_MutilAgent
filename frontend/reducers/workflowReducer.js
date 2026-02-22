@@ -46,6 +46,19 @@ export const ActionTypes = {
 
   // 断连恢复
   HYDRATE_FROM_STATUS: 'HYDRATE_FROM_STATUS',
+  SET_RECOVERY_STATE: 'SET_RECOVERY_STATE',
+  CLEAR_RECOVERY_STATE: 'CLEAR_RECOVERY_STATE',
+};
+
+export const initialRecoveryState = {
+  mode: 'idle',
+  reason: null,
+  message: null,
+  startedAt: null,
+  deadlineAt: null,
+  attempts: 0,
+  lastSessionStatus: null,
+  updatedAt: null,
 };
 
 /**
@@ -68,6 +81,9 @@ export const initialState = {
   toolEvents: [],
   retryEvents: [],
   toolMetrics: null,
+  demoMetrics: null,
+  reportCharts: null,
+  recovery: initialRecoveryState,
 };
 
 /**
@@ -108,6 +124,9 @@ export function workflowReducer(state, action) {
         toolEvents: [],
         retryEvents: [],
         toolMetrics: null,
+        demoMetrics: null,
+        reportCharts: null,
+        recovery: initialRecoveryState,
         currentDebateRound: 0,
         phase: 'init',
         isGenerating: false,
@@ -128,6 +147,9 @@ export function workflowReducer(state, action) {
         toolEvents: [],
         retryEvents: [],
         toolMetrics: null,
+        demoMetrics: null,
+        reportCharts: null,
+        recovery: initialRecoveryState,
         currentDebateRound: 0,
         phase: 'init',
       };
@@ -136,6 +158,22 @@ export function workflowReducer(state, action) {
       return {
         ...state,
         isGenerating: false,
+      };
+
+    case ActionTypes.SET_RECOVERY_STATE:
+      return {
+        ...state,
+        recovery: {
+          ...state.recovery,
+          ...action.payload,
+          updatedAt: Date.now(),
+        },
+      };
+
+    case ActionTypes.CLEAR_RECOVERY_STATE:
+      return {
+        ...state,
+        recovery: initialRecoveryState,
       };
     
     case ActionTypes.SET_PHASE:
@@ -414,6 +452,25 @@ export function workflowReducer(state, action) {
           payload.tool_metrics && typeof payload.tool_metrics === 'object'
             ? payload.tool_metrics
             : state.toolMetrics,
+        demoMetrics:
+          payload.demo_metrics && typeof payload.demo_metrics === 'object'
+            ? payload.demo_metrics
+            : state.demoMetrics,
+        reportCharts:
+          payload.report_charts && typeof payload.report_charts === 'object'
+            ? payload.report_charts
+            : state.reportCharts,
+        recovery:
+          session.status === 'running'
+            ? state.recovery
+            : state.recovery.mode === 'recovering'
+              ? {
+                  ...state.recovery,
+                  mode: 'recovered',
+                  message: '状态接口已恢复展示。',
+                  lastSessionStatus: session.status || state.recovery.lastSessionStatus,
+                }
+              : state.recovery,
         agentResults: Object.keys(agentResults).length > 0 ? agentResults : state.agentResults,
         debateExchanges: debateExchanges.length > 0 ? debateExchanges : state.debateExchanges,
       };
@@ -474,4 +531,6 @@ export const actions = {
   }),
   consensusReached: () => ({ type: ActionTypes.CONSENSUS_REACHED }),
   hydrateFromStatus: (payload) => ({ type: ActionTypes.HYDRATE_FROM_STATUS, payload }),
+  setRecoveryState: (payload) => ({ type: ActionTypes.SET_RECOVERY_STATE, payload }),
+  clearRecoveryState: () => ({ type: ActionTypes.CLEAR_RECOVERY_STATE }),
 };

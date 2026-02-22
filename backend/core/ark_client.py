@@ -9,6 +9,7 @@ from functools import lru_cache
 from dataclasses import dataclass
 from enum import Enum
 import logging
+import re
 
 import httpx
 from volcenginesdkarkruntime import Ark
@@ -162,6 +163,89 @@ class ArkClientWrapper:
         thinking_parts: list[str] = []
         output_parts: list[str] = []
         sources: list[str] = []
+        source_seen: set[str] = set()
+        url_pattern = re.compile(r"https?://[^\s\]\[<>()\"']+")
+
+        def _add_source(raw_value: Any) -> None:
+            if not isinstance(raw_value, str):
+                return
+            value = raw_value.strip()
+            if not value:
+                return
+            if value.startswith("www."):
+                value = f"https://{value}"
+            value = value.rstrip(".,;:)]}>\"'")
+            if not (value.startswith("http://") or value.startswith("https://")):
+                return
+            if value in source_seen:
+                return
+            source_seen.add(value)
+            sources.append(value)
+
+        def _collect_sources(payload: Any) -> None:
+            if payload is None:
+                return
+
+            if isinstance(payload, str):
+                for match in url_pattern.findall(payload):
+                    _add_source(match)
+                return
+
+            if isinstance(payload, dict):
+                for key, value in payload.items():
+                    key_lower = str(key).lower()
+                    if key_lower in {"url", "href", "source"}:
+                        _add_source(value)
+                    elif key_lower == "url_citation" and isinstance(value, dict):
+                        _add_source(value.get("url"))
+
+                    if isinstance(value, (dict, list, tuple, set, str)):
+                        _collect_sources(value)
+                return
+
+            if isinstance(payload, (list, tuple, set)):
+                for item in payload:
+                    _collect_sources(item)
+                return
+
+            if hasattr(payload, "model_dump"):
+                try:
+                    _collect_sources(payload.model_dump())  # type: ignore[call-arg]
+                    return
+                except Exception:
+                    pass
+
+            if hasattr(payload, "to_dict"):
+                try:
+                    _collect_sources(payload.to_dict())  # type: ignore[call-arg]
+                    return
+                except Exception:
+                    pass
+
+            raw_dict = getattr(payload, "__dict__", None)
+            if isinstance(raw_dict, dict):
+                _collect_sources(raw_dict)
+
+        def _chunk_to_dict(chunk_obj: Any) -> dict[str, Any]:
+            if hasattr(chunk_obj, "model_dump"):
+                try:
+                    data = chunk_obj.model_dump()  # type: ignore[call-arg]
+                    if isinstance(data, dict):
+                        return data
+                except Exception:
+                    pass
+            if hasattr(chunk_obj, "to_dict"):
+                try:
+                    data = chunk_obj.to_dict()  # type: ignore[call-arg]
+                    if isinstance(data, dict):
+                        return data
+                except Exception:
+                    pass
+            try:
+                data = dict(getattr(chunk_obj, "__dict__", {}) or {})
+                return data if isinstance(data, dict) else {}
+            except Exception:
+                return {}
 
         try:
             # 发送开始事件
@@ -204,8 +288,12 @@ class ArkClientWrapper:
                     search_results = getattr(chunk, "results", [])
                     for result in search_results:
                         url = getattr(result, "url", None)
-                        if url:
-                            sources.append(url)
+                        _add_source(url)
+
+                    # 兼容不同 SDK 的返回结构：从完整 chunk 中递归提取 URL
+                    payload = _chunk_to_dict(chunk)
+                    _collect_sources(payload)
+
                     yield StreamEvent(
                         type=StreamEventType.SEARCH_COMPLETE,
                         metadata={
@@ -218,6 +306,16 @@ class ArkClientWrapper:
                 elif chunk_type == "response.web_search_call.searching":
                     # 搜索开始
                     yield StreamEvent(type=StreamEventType.SEARCH_START)
+
+                elif chunk_type in (
+                    "response.output_item.added",
+                    "response.output_item.done",
+                    "response.output_text.done",
+                    "response.completed",
+                ):
+                    # 兼容 OpenAI/Ark 在 message annotations 中回传 url_citation 的场景
+                    payload = _chunk_to_dict(chunk)
+                    _collect_sources(payload)
 
                 else:
                     # 兼容旧格式：直接从 delta 属性获取
@@ -234,6 +332,7 @@ class ArkClientWrapper:
                 metadata={
                     "has_thinking": bool(thinking_parts),
                     "sources_count": len(sources),
+                    "sources": list(dict.fromkeys(sources)),
                 },
             )
 

@@ -75,6 +75,43 @@
  */
 
 /**
+ * 路演关键指标
+ * @typedef {Object} DemoMetrics
+ * @property {number | null} total_duration_ms
+ * @property {number} stability_score
+ * @property {'high' | 'medium' | 'low'} stability_level
+ * @property {number} evidence_coverage_rate
+ * @property {number} evidence_claims_total
+ * @property {number} evidence_claims_with_sources
+ * @property {number} degrade_count
+ * @property {number} retry_count
+ * @property {number} failed_agents
+ * @property {number} completed_agents
+ * @property {number} total_agents
+ */
+
+/**
+ * 报告图表（Vega-Lite）
+ * @typedef {Object} ReportCharts
+ * @property {string} spec_version
+ * @property {string} generated_at
+ * @property {Array<{id:string,title:string,description?:string,fallback_text?:string,spec:Object}>} charts
+ */
+
+/**
+ * 演示保护模式状态
+ * @typedef {Object} RecoveryState
+ * @property {'idle' | 'recovering' | 'recovered' | 'timeout'} mode
+ * @property {string | null} reason
+ * @property {string | null} message
+ * @property {number | null} startedAt
+ * @property {number | null} deadlineAt
+ * @property {number} attempts
+ * @property {string | null} lastSessionStatus
+ * @property {number | null} updatedAt
+ */
+
+/**
  * 工作流状态
  * @typedef {Object} WorkflowState
  * @property {string | null} sessionId - 会话 ID
@@ -92,6 +129,9 @@
  * @property {Object[]} toolEvents - 工具调用事件
  * @property {Object[]} retryEvents - 重试事件
  * @property {ToolMetrics | null} toolMetrics - 工具层聚合指标
+ * @property {DemoMetrics | null} demoMetrics - 路演关键指标
+ * @property {ReportCharts | null} reportCharts - 报告图表增强配置
+ * @property {RecoveryState} recovery - 演示保护模式状态
  */
 
 // Worker Agent 名称常量

@@ -329,6 +329,7 @@ class SessionEventSink:
             content = "".join(buf.content) if buf else None
             thinking = "".join(buf.thinking) if buf and buf.thinking else None
             duration_ms = event.get("duration_ms")
+            sources = self._normalize_sources(event.get("sources"))
 
             fields: dict[str, Any] = {
                 "status": str(event.get("status") or "completed"),
@@ -337,6 +338,7 @@ class SessionEventSink:
                 else None,
                 "content": content,
                 "thinking": thinking,
+                "sources": sources,
                 "completed_at": datetime.now(),
             }
             # 清理 None
@@ -695,6 +697,24 @@ class SessionEventSink:
             return float(value)
         except Exception:
             return None
+
+    @staticmethod
+    def _normalize_sources(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            url = item.strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            normalized.append(url)
+
+        return normalized
 
 
 def create_session_event_sink(

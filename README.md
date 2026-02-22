@@ -114,6 +114,16 @@ npm run dev  # 默认 http://localhost:3000
 
 ---
 
+## Phase 5 路演资产
+
+- Demo Script（3~5 分钟话术与现场操作）：`PHASE5_DEMO_SCRIPT.md`
+- 评委 FAQ（高频追问标准回答）：`PHASE5_FAQ.md`
+- 竞品差异一页纸：`PHASE5_COMPETITOR_ONEPAGER.md`
+- 风险应答与现场处置：`PHASE5_RISK_RESPONSE.md`
+- 跑通验收记录（当前阶段结论与命令）：`PHASE5_ACCEPTANCE.md`
+
+---
+
 ## 贡献 & 许可
 - 建议先跑通：`/api/v2/market-insight/stream` 的完整工作流（含 agent 事件与最终报告）。若改动前端交互，保持 SSE 事件解析与渲染链路可用。  
 - 许可证：MIT（如团队有要求可替换）。

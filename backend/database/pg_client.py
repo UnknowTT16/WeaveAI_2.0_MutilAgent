@@ -405,6 +405,58 @@ class PgClient:
             cols = [d.name for d in cur.description]
             return dict(zip(cols, row))
 
+    def list_sessions_summary(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        status: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """读取会话摘要列表（用于历史会话页面）。"""
+        safe_limit = max(1, min(int(limit), 100))
+        safe_offset = max(0, int(offset))
+
+        where_sql = ""
+        params: list[Any] = []
+        if status:
+            where_sql = "WHERE status = %s"
+            params.append(str(status))
+
+        sql = f"""
+        SELECT
+          id,
+          status,
+          phase,
+          current_debate_round,
+          created_at,
+          started_at,
+          completed_at,
+          profile,
+          target_market,
+          supply_chain,
+          seller_type,
+          min_price,
+          max_price,
+          debate_rounds,
+          enable_followup,
+          enable_websearch,
+          error_message,
+          LEFT(COALESCE(synthesized_report, ''), 260) AS report_preview,
+          CASE WHEN synthesized_report IS NULL OR synthesized_report = '' THEN FALSE ELSE TRUE END AS has_report
+        FROM public.sessions
+        {where_sql}
+        ORDER BY COALESCE(started_at, created_at) DESC
+        LIMIT %s OFFSET %s
+        """
+
+        params.extend([safe_limit, safe_offset])
+
+        with self.conn().cursor() as cur:
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+            cols = [d.name for d in cur.description]
+            return [dict(zip(cols, r)) for r in rows]
+
     def list_agent_results(self, session_id: str) -> list[dict[str, Any]]:
         sql = """
         SELECT agent_name, status, duration_ms, confidence, error_message, content, thinking, sources,

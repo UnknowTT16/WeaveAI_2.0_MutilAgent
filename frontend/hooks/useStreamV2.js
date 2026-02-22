@@ -8,6 +8,27 @@ import { useCallback, useRef, useEffect } from 'react';
 import { useWorkflowActions } from '../contexts/WorkflowContext';
 import { API_ENDPOINTS } from '../lib/constants';
 
+const STREAM_IDLE_TIMEOUT_MS = 20000;
+const STATUS_RECOVERY_TIMEOUT_MS = 90000;
+const STATUS_RECOVERY_INTERVAL_MS = 3000;
+const TERMINAL_SESSION_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createUuidFallback() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (token) => {
+    const rand = Math.floor(Math.random() * 16);
+    const value = token === 'x' ? rand : ((rand & 0x3) | 0x8);
+    return value.toString(16);
+  });
+}
+
+function isTerminalStatus(status) {
+  return TERMINAL_SESSION_STATUSES.has(String(status || '').toLowerCase());
+}
+
 /**
  * v2 流式生成 Hook
  * 自动将 SSE 事件分发到 WorkflowContext
@@ -20,7 +41,7 @@ export function useStreamV2() {
     if (typeof globalThis !== 'undefined' && globalThis.crypto?.randomUUID) {
       return globalThis.crypto.randomUUID();
     }
-    return `session_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    return createUuidFallback();
   }, []);
 
   const hydrateFromStatus = useCallback(async (sessionId) => {
@@ -36,7 +57,103 @@ export function useStreamV2() {
       return null;
     }
   }, [actions]);
-  
+
+  const recoverFromStatus = useCallback(async (sessionId, reason = 'stream_interrupted') => {
+    if (!sessionId) {
+      return { recovered: false, status: null, reason };
+    }
+
+    const startedAt = Date.now();
+    const deadline = startedAt + STATUS_RECOVERY_TIMEOUT_MS;
+    let latestPayload = null;
+    let attempts = 0;
+
+    actions.setRecoveryState({
+      mode: 'recovering',
+      reason,
+      message: '检测到连接波动，正在通过状态接口自动恢复。',
+      startedAt,
+      deadlineAt: deadline,
+      attempts: 0,
+      lastSessionStatus: null,
+    });
+
+    while (Date.now() <= deadline) {
+      attempts += 1;
+      latestPayload = await hydrateFromStatus(sessionId);
+      const status = latestPayload?.session?.status || null;
+      actions.setRecoveryState({
+        mode: 'recovering',
+        reason,
+        message: '恢复进行中：持续轮询状态接口。',
+        startedAt,
+        deadlineAt: deadline,
+        attempts,
+        lastSessionStatus: status,
+      });
+
+      if (isTerminalStatus(status)) {
+        actions.stopGeneration();
+        actions.setRecoveryState({
+          mode: 'recovered',
+          reason,
+          message: '已通过状态接口恢复展示，流程结果已同步。',
+          startedAt,
+          deadlineAt: deadline,
+          attempts,
+          lastSessionStatus: status,
+        });
+        return {
+          recovered: true,
+          status,
+          payload: latestPayload,
+          reason,
+          attempts,
+        };
+      }
+      await sleep(STATUS_RECOVERY_INTERVAL_MS);
+    }
+
+    const finalStatus = latestPayload?.session?.status || null;
+    if (isTerminalStatus(finalStatus)) {
+      actions.stopGeneration();
+      actions.setRecoveryState({
+        mode: 'recovered',
+        reason,
+        message: '恢复窗口结束前已同步到终态结果。',
+        startedAt,
+        deadlineAt: deadline,
+        attempts,
+        lastSessionStatus: finalStatus,
+      });
+      return {
+        recovered: true,
+        status: finalStatus,
+        payload: latestPayload,
+        reason,
+        attempts,
+      };
+    }
+
+    actions.setRecoveryState({
+      mode: 'timeout',
+      reason,
+      message: '90 秒自动恢复窗口已结束，请手动重试。',
+      startedAt,
+      deadlineAt: deadline,
+      attempts,
+      lastSessionStatus: finalStatus,
+    });
+
+    return {
+      recovered: false,
+      status: finalStatus,
+      payload: latestPayload,
+      reason,
+      attempts,
+    };
+  }, [actions, hydrateFromStatus]);
+
   // 清理函数
   const cleanup = useCallback(() => {
     if (abortControllerRef.current) {
@@ -62,6 +179,7 @@ export function useStreamV2() {
       profile,
       enableWebsearch = false,
       debateRounds = 2,
+      enableFollowup = true,
       retryMaxAttempts = 2,
       retryBackoffMs = 300,
       degradeMode = 'partial',
@@ -79,6 +197,7 @@ export function useStreamV2() {
     // 开始生成
     actions.startGeneration();
     actions.setSession(sessionId);
+    actions.clearRecoveryState();
     
     try {
       // 调用 v2 API
@@ -92,6 +211,7 @@ export function useStreamV2() {
           profile,
           enable_websearch: enableWebsearch,
           debate_rounds: debateRounds,
+          enable_followup: enableFollowup,
           retry_max_attempts: retryMaxAttempts,
           retry_backoff_ms: retryBackoffMs,
           degrade_mode: degradeMode,
@@ -159,11 +279,45 @@ export function useStreamV2() {
 
         return rest;
       };
-      
+
+      const readWithTimeout = async () => {
+        let timeoutId = null;
+        try {
+          return await Promise.race([
+            reader.read().then((result) => ({ type: 'read', result })).catch((error) => ({ type: 'read_error', error })),
+            new Promise((resolve) => {
+              timeoutId = setTimeout(() => resolve({ type: 'idle_timeout' }), STREAM_IDLE_TIMEOUT_MS);
+            }),
+          ]);
+        } finally {
+          if (timeoutId) clearTimeout(timeoutId);
+        }
+      };
+
       while (true) {
-        const { value, done } = await reader.read();
+        const outcome = await readWithTimeout();
+
+        if (outcome.type === 'idle_timeout') {
+          if (!abortController.signal.aborted) {
+            cleanup();
+            const recovery = await recoverFromStatus(sessionId, 'stream_idle_timeout');
+            if (!recovery.recovered) {
+              actions.setError('连接波动，90 秒内未能自动恢复，请重试。');
+            }
+          }
+          break;
+        }
+
+        if (outcome.type === 'read_error') {
+          if (abortController.signal.aborted) {
+            break;
+          }
+          throw outcome.error;
+        }
+
+        const { value, done } = outcome.result;
         if (done) break;
-        
+
         buffer += decoder.decode(value, { stream: true });
         buffer = consumeSSEBlocks(buffer);
       }
@@ -178,23 +332,30 @@ export function useStreamV2() {
         if (!sawAnyEvent && !statusPayload) {
           actions.setError('流式连接已建立，但未收到有效事件。请检查后端日志或网络。');
         }
-        if (sawOrchestratorEnd || sessionStatus !== 'running') {
+        if (sawOrchestratorEnd || isTerminalStatus(sessionStatus)) {
           actions.stopGeneration();
+        } else if (String(sessionStatus || '').toLowerCase() === 'running') {
+          const recovery = await recoverFromStatus(sessionId, 'stream_ended_while_running');
+          if (!recovery.recovered) {
+            actions.setError('连接已结束，但状态未完成，90 秒恢复窗口已超时。');
+          }
         }
       }
-      
+
     } catch (error) {
       if (error.name === 'AbortError') {
         console.log('Stream aborted by user');
       } else {
         console.error('Stream error:', error);
-        actions.setError(error.message);
-        await hydrateFromStatus(sessionId);
+        const recovery = await recoverFromStatus(sessionId, 'stream_exception');
+        if (!recovery.recovered) {
+          actions.setError(error.message || '流式连接异常，请稍后重试。');
+        }
       }
     } finally {
       abortControllerRef.current = null;
     }
-  }, [actions, cleanup, createSessionId, hydrateFromStatus]);
+  }, [actions, cleanup, createSessionId, hydrateFromStatus, recoverFromStatus]);
   
   /**
    * 停止流式生成
@@ -202,6 +363,7 @@ export function useStreamV2() {
   const stopStream = useCallback(() => {
     cleanup();
     actions.stopGeneration();
+    actions.clearRecoveryState();
   }, [cleanup, actions]);
   
   return {

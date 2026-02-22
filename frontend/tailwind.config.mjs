@@ -11,7 +11,14 @@ const config = {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['var(--font-geist-sans)', 'system-ui', 'sans-serif'],
+        sans: [
+          '"Noto Sans SC"',
+          '"PingFang SC"',
+          '"Microsoft YaHei"',
+          'var(--font-geist-sans)',
+          'system-ui',
+          'sans-serif',
+        ],
         mono: ['var(--font-geist-mono)', 'monospace'],
       },
       colors: {

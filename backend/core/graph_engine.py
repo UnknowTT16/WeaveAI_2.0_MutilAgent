@@ -72,6 +72,27 @@ _ADAPTIVE_STATE_COND = threading.Condition(_ADAPTIVE_STATE_LOCK)
 
 
 # ============================================
+# 工具缓存共享实例（进程内）
+# ============================================
+
+_SHARED_TOOL_CACHE: Optional[ToolCache] = None
+_SHARED_TOOL_CACHE_LOCK = threading.Lock()
+
+
+def _get_shared_tool_cache() -> ToolCache:
+    """获取进程内共享缓存，避免每次请求重建导致缓存失效。"""
+    global _SHARED_TOOL_CACHE
+
+    with _SHARED_TOOL_CACHE_LOCK:
+        if _SHARED_TOOL_CACHE is None:
+            _SHARED_TOOL_CACHE = ToolCache(
+                ttl_seconds=settings.tool_cache_ttl_seconds,
+                max_size=settings.tool_cache_max_size,
+            )
+        return _SHARED_TOOL_CACHE
+
+
+# ============================================
 # 状态定义
 # ============================================
 
@@ -304,10 +325,7 @@ class MarketInsightGraphEngine(IGraphEngine):
         self._graph: Optional[StateGraph] = None
         self._compiled_graph = None
         self._checkpointer: Optional[MemorySaver] = None
-        self._tool_cache = ToolCache(
-            ttl_seconds=settings.tool_cache_ttl_seconds,
-            max_size=settings.tool_cache_max_size,
-        )
+        self._tool_cache = _get_shared_tool_cache()
         self._tool_guardrail = ToolGuardrail(
             max_estimated_cost_usd=settings.tool_guardrail_max_estimated_cost_usd,
             max_error_rate=settings.tool_guardrail_max_error_rate,
@@ -760,9 +778,9 @@ class MarketInsightGraphEngine(IGraphEngine):
 
             for attempt in range(1, max_attempts + 1):
                 active_invocation_id: Optional[str] = None
+                sources: list[str] = []
                 try:
                     thinking_parts: list[str] = []
-                    sources: list[str] = []
 
                     if self.agent_factory:
                         agent = self.agent_factory(agent_name)
@@ -894,6 +912,7 @@ class MarketInsightGraphEngine(IGraphEngine):
                                         "agent": agent_name,
                                         "status": "completed",
                                         "duration_ms": duration_ms,
+                                        "sources": list(dict.fromkeys(sources)),
                                         "attempt": attempt,
                                         "timestamp": datetime.now().isoformat(),
                                     }
@@ -988,6 +1007,17 @@ class MarketInsightGraphEngine(IGraphEngine):
                                     for source in end_result.get("sources", []):
                                         if source not in sources:
                                             sources.append(source)
+                                elif event.type == StreamEventType.RESPONSE_COMPLETE:
+                                    meta = event.metadata or {}
+                                    final_sources = meta.get("sources")
+                                    if isinstance(final_sources, list):
+                                        for source in final_sources:
+                                            if (
+                                                isinstance(source, str)
+                                                and source
+                                                and source not in sources
+                                            ):
+                                                sources.append(source)
 
                         content = "".join(content_parts)
                         content = agent.post_process(content, context)
@@ -1030,6 +1060,7 @@ class MarketInsightGraphEngine(IGraphEngine):
                             "agent": agent_name,
                             "status": "completed",
                             "duration_ms": duration_ms,
+                            "sources": list(dict.fromkeys(sources)),
                             "attempt": attempt,
                             "timestamp": datetime.now().isoformat(),
                         }
@@ -1095,6 +1126,7 @@ class MarketInsightGraphEngine(IGraphEngine):
                                 "agent": agent_name,
                                 "status": "skipped",
                                 "duration_ms": duration_ms,
+                                "sources": list(dict.fromkeys(sources)),
                                 "attempt": attempt,
                                 "timestamp": datetime.now().isoformat(),
                             }
