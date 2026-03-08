@@ -1,6 +1,0 @@
-后端启动： uvicorn main:app --reload --port 8000
-前端启动：npm run dev
-
-git add .
-git commit -m "Update project files"
- git push -u origin main
