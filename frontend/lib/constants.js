@@ -1,4 +1,7 @@
-export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+const browserOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+
+export const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL || browserOrigin || 'http://localhost:8000';
 
 export const API_ENDPOINTS = {
   MARKET_INSIGHT_STREAM: `${API_BASE_URL}/api/v2/market-insight/stream`,
