@@ -137,6 +137,7 @@ class Settings(BaseSettings):
     # ============================================
     debug: bool = Field(default=False, alias="DEBUG")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    cors_allowed_origins: str = Field(default="", alias="CORS_ALLOWED_ORIGINS")
 
     # 辩论配置
     default_debate_rounds: int = Field(default=2, alias="DEFAULT_DEBATE_ROUNDS")
@@ -201,6 +202,13 @@ class Settings(BaseSettings):
         return AGENT_WEBSEARCH_CONFIG.get(
             agent_name, {"enabled": True, "limit": self.web_search_limit}
         )
+
+    def get_cors_allowed_origins(self) -> list[str]:
+        """获取额外允许的跨域来源，使用逗号分隔。"""
+        raw_value = str(self.cors_allowed_origins or "").strip()
+        if not raw_value:
+            return []
+        return [origin.strip() for origin in raw_value.split(",") if origin.strip()]
 
     class Config:
         env_file = ".env"

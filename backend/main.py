@@ -12,6 +12,8 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from core.config import settings
+
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,7 +32,7 @@ app = FastAPI(
 # CORS 配置
 # ============================================
 
-origins = [
+default_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://172.20.10.6:3000",
@@ -38,6 +40,7 @@ origins = [
     "http://8.134.100.38:3000",
     "http://192.168.43.4:3000",
 ]
+origins = list(dict.fromkeys(default_origins + settings.get_cors_allowed_origins()))
 
 app.add_middleware(
     CORSMiddleware,
