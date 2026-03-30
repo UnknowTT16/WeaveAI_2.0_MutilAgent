@@ -130,3 +130,36 @@ class ValidationError(WeaveAIException):
             details={"field": field, **(details or {})}
         )
         self.field = field
+
+
+class ResourceNotFoundError(WeaveAIException):
+    """资源不存在错误。"""
+
+    def __init__(self, message: str, details: Optional[dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="RESOURCE_NOT_FOUND",
+            details=details,
+        )
+
+
+class ConflictError(WeaveAIException):
+    """资源状态冲突错误。"""
+
+    def __init__(self, message: str, details: Optional[dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="CONFLICT",
+            details=details,
+        )
+
+
+class ServiceUnavailableError(WeaveAIException):
+    """服务不可用错误。"""
+
+    def __init__(self, message: str, details: Optional[dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="SERVICE_UNAVAILABLE",
+            details=details,
+        )

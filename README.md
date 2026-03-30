@@ -66,13 +66,14 @@ WeaveAI_2.0/
 
 ```powershell
 cd .\backend
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+uv python install 3.13
+uv venv .venv --python 3.13
+uv pip install --python .\.venv\Scripts\python.exe -r requirements.txt
 
 # 建议设置 Ark Key（未配置时可访问健康检查，但无法调用模型）
 # $env:ARK_API_KEY="你的ArkKey"
 
-.\.venv\Scripts\python.exe -m uvicorn main:app --reload --port 8000
+.\.venv\Scripts\python.exe -m uvicorn api.main:app --reload --port 8000
 ```
 
 ### 4.2 启动前端
@@ -120,11 +121,11 @@ ARK_API_KEY=your_ark_api_key
 运行位置：`PowerShell`，项目根目录
 
 ```powershell
-docker exec -i supabase-db psql -U supabase_admin -d postgres < backend/database/migrations/001_initial_schema.sql
-docker exec -i supabase-db psql -U supabase_admin -d postgres < backend/database/migrations/002_align_v2_schema.sql
-docker exec -i supabase-db psql -U supabase_admin -d postgres < backend/database/migrations/003_update_views_and_functions.sql
-docker exec -i supabase-db psql -U supabase_admin -d postgres < backend/database/migrations/004_phase3_evidence_memory.sql
-docker exec -i supabase-db psql -U supabase_admin -d postgres < backend/database/migrations/005_phase4_tool_metrics.sql
+docker exec -i supabase-db psql -U supabase_admin -d postgres < backend/infrastructure/db/migrations/001_initial_schema.sql
+docker exec -i supabase-db psql -U supabase_admin -d postgres < backend/infrastructure/db/migrations/002_align_v2_schema.sql
+docker exec -i supabase-db psql -U supabase_admin -d postgres < backend/infrastructure/db/migrations/003_update_views_and_functions.sql
+docker exec -i supabase-db psql -U supabase_admin -d postgres < backend/infrastructure/db/migrations/004_phase3_evidence_memory.sql
+docker exec -i supabase-db psql -U supabase_admin -d postgres < backend/infrastructure/db/migrations/005_phase4_tool_metrics.sql
 ```
 
 ---
